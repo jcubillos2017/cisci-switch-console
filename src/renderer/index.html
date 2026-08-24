@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cisco Switch Console</title>
+    <link rel="stylesheet" href="../../node_modules/@xterm/xterm/css/xterm.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">CS</div>
+          <div>
+            <h1>Cisco Switch Console</h1>
+            <p>Terminal y plantillas Cisco IOS</p>
+          </div>
+        </div>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Conexion</h2>
+            <span id="statusBadge" class="badge idle">Sin sesion</span>
+          </div>
+
+          <label>
+            Perfiles guardados
+            <select id="savedProfiles">
+              <option value="">Nuevo perfil</option>
+            </select>
+          </label>
+
+          <label>
+            Perfil
+            <input id="profileName" value="Core SW" autocomplete="off" />
+          </label>
+
+          <div class="grid-2">
+            <label>
+              Modelo
+              <select id="connectionModel">
+                <option>Catalyst 2960</option>
+                <option>Catalyst 2960-X</option>
+                <option>Catalyst 3560</option>
+                <option>Catalyst 3750</option>
+                <option>Catalyst 9200</option>
+                <option>Catalyst 9300</option>
+                <option>Small Business CBS</option>
+              </select>
+            </label>
+            <label>
+              Sitio
+              <input id="site" placeholder="Casa matriz" autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="grid-2">
+            <label>
+              Protocolo
+              <select id="protocol">
+                <option value="ssh">SSH</option>
+                <option value="telnet">Telnet</option>
+              </select>
+            </label>
+            <label>
+              Puerto
+              <input id="port" value="22" inputmode="numeric" />
+            </label>
+          </div>
+
+          <label>
+            Host / IP
+            <input id="host" placeholder="192.168.10.2" autocomplete="off" />
+          </label>
+
+          <div class="grid-2">
+            <label>
+              Usuario
+              <input id="username" placeholder="admin" autocomplete="username" />
+            </label>
+            <label>
+              Contrasena
+              <input id="password" type="password" autocomplete="current-password" />
+            </label>
+          </div>
+
+          <label class="check-row">
+            <input id="enableLog" type="checkbox" checked />
+            <span>Guardar log de sesion</span>
+          </label>
+
+          <div class="button-row">
+            <button id="connectBtn" class="primary" type="button">Conectar</button>
+            <button id="disconnectBtn" type="button" disabled>Desconectar</button>
+          </div>
+
+          <div class="button-row">
+            <button id="saveProfileBtn" type="button">Guardar Perfil</button>
+            <button id="deleteProfileBtn" type="button">Eliminar</button>
+          </div>
+        </section>
+
+        <section class="panel compact">
+          <div class="panel-title">
+            <h2>Comandos Rapidos</h2>
+          </div>
+          <button class="macro" data-command="enable">enable</button>
+          <button class="macro" data-command="configure terminal">configure terminal</button>
+          <button class="macro" data-command="show running-config">show running-config</button>
+          <button class="macro" data-command="show vlan brief">show vlan brief</button>
+          <button class="macro" data-command="show interfaces status">show interfaces status</button>
+          <button class="macro" data-command="write memory">write memory</button>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <nav class="tabs" aria-label="Vistas">
+          <button class="tab active" data-tab="terminal">Terminal</button>
+          <button class="tab" data-tab="inventory">Inventario</button>
+          <button class="tab" data-tab="backup">Respaldos</button>
+          <button class="tab" data-tab="wizard">Config IOS</button>
+          <button class="tab" data-tab="models">Modelos</button>
+        </nav>
+
+        <section id="terminalTab" class="tab-panel active">
+          <div class="terminal-toolbar">
+            <div>
+              <strong id="sessionTitle">Terminal</strong>
+              <span id="sessionSubtitle">Listo para conectar</span>
+            </div>
+            <div class="button-row slim">
+              <button id="clearTerminalBtn" type="button">Limpiar</button>
+              <button id="backupActiveBtn" type="button">Respaldar</button>
+              <button id="sendGeneratedBtn" type="button" disabled>Enviar Config</button>
+            </div>
+          </div>
+          <div id="terminal"></div>
+          <div class="command-line">
+            <input id="commandInput" placeholder="Escribir comando y presionar Enter" autocomplete="off" />
+            <button id="sendCommandBtn" type="button">Enviar</button>
+          </div>
+        </section>
+
+        <section id="inventoryTab" class="tab-panel">
+          <div class="inventory-layout">
+            <section class="panel inventory-panel">
+              <div class="panel-title">
+                <h2>Inventario de switches</h2>
+                <div class="button-row slim">
+                  <button id="importInventoryBtn" type="button">Importar</button>
+                  <button id="exportInventoryJsonBtn" type="button">Exportar JSON</button>
+                  <button id="exportInventoryCsvBtn" type="button">Exportar CSV</button>
+                </div>
+              </div>
+              <table class="inventory-table">
+                <thead>
+                  <tr>
+                    <th>Nombre</th>
+                    <th>Host</th>
+                    <th>Modelo</th>
+                    <th>Sitio</th>
+                    <th>Acceso</th>
+                    <th>Accion</th>
+                  </tr>
+                </thead>
+                <tbody id="inventoryRows"></tbody>
+              </table>
+            </section>
+          </div>
+        </section>
+
+        <section id="backupTab" class="tab-panel">
+          <div class="backup-layout">
+            <section class="panel backup-actions">
+              <div class="panel-title">
+                <h2>Respaldos y comparacion</h2>
+                <span id="backupStatus" class="badge idle">Listo</span>
+              </div>
+              <p class="panel-note">El respaldo automatico usa SSH y guarda running-config y startup-config en Documentos.</p>
+              <div class="button-row">
+                <button id="backupSelectedBtn" class="primary" type="button">Respaldar perfil actual</button>
+                <button id="compareTextBtn" type="button">Comparar textos</button>
+              </div>
+              <label>
+                Resultado
+                <textarea id="backupResult" rows="5" readonly></textarea>
+              </label>
+            </section>
+
+            <section class="panel compare-panel">
+              <div class="grid-2">
+                <label>
+                  Running-config
+                  <textarea id="runningConfigText" rows="14" placeholder="Pegue aqui running-config o use Respaldar perfil actual"></textarea>
+                </label>
+                <label>
+                  Startup-config
+                  <textarea id="startupConfigText" rows="14" placeholder="Pegue aqui startup-config o use Respaldar perfil actual"></textarea>
+                </label>
+              </div>
+              <div class="panel-title compare-title">
+                <h2>Diferencias</h2>
+                <span id="diffSummary" class="badge">Sin comparar</span>
+              </div>
+              <pre id="diffPreview"></pre>
+            </section>
+          </div>
+        </section>
+
+        <section id="wizardTab" class="tab-panel">
+          <div class="wizard-layout">
+            <form id="configForm" class="panel form-panel">
+              <div class="panel-title">
+                <h2>Generador Cisco IOS</h2>
+                <span class="badge">Plantilla segura</span>
+              </div>
+
+              <div class="grid-3">
+                <label>
+                  Modelo
+                  <select id="model">
+                    <option>Catalyst 2960</option>
+                    <option>Catalyst 2960-X</option>
+                    <option>Catalyst 3560</option>
+                    <option>Catalyst 3750</option>
+                    <option>Catalyst 9200</option>
+                    <option>Catalyst 9300</option>
+                    <option>Small Business CBS</option>
+                  </select>
+                </label>
+                <label>
+                  Hostname
+                  <input id="cfgHostname" value="SW-ACCESO-01" />
+                </label>
+                <label>
+                  VLAN gestion
+                  <input id="mgmtVlan" value="10" inputmode="numeric" />
+                </label>
+              </div>
+
+              <div class="grid-3">
+                <label>
+                  IP gestion
+                  <input id="mgmtIp" value="192.168.10.2" />
+                </label>
+                <label>
+                  Mascara
+                  <input id="mgmtMask" value="255.255.255.0" />
+                </label>
+                <label>
+                  Gateway
+                  <input id="gateway" value="192.168.10.1" />
+                </label>
+              </div>
+
+              <div class="grid-3">
+                <label>
+                  Dominio
+                  <input id="domainName" value="empresa.local" />
+                </label>
+                <label>
+                  Usuario local
+                  <input id="localUser" value="admin" />
+                </label>
+                <label>
+                  Secret
+                  <input id="localSecret" type="password" value="Cambiar123!" />
+                </label>
+              </div>
+
+              <label>
+                VLANs
+                <textarea id="vlans" rows="4">10, Gestion
+20, Usuarios
+30, Telefonia
+99, Nativa</textarea>
+              </label>
+
+              <div class="grid-2">
+                <label>
+                  Puertos acceso
+                  <textarea id="accessPorts" rows="4">Gi1/0/1-12,20
+Gi1/0/13-18,30</textarea>
+                </label>
+                <label>
+                  Troncales
+                  <textarea id="trunkPorts" rows="4">Gi1/0/24,10,20,30,99</textarea>
+                </label>
+              </div>
+
+              <div class="option-grid">
+                <label class="check-row">
+                  <input id="enableSsh" type="checkbox" checked />
+                  <span>Habilitar SSH v2</span>
+                </label>
+                <label class="check-row">
+                  <input id="disableTelnet" type="checkbox" checked />
+                  <span>Bloquear Telnet en VTY</span>
+                </label>
+                <label class="check-row">
+                  <input id="spanningTree" type="checkbox" checked />
+                  <span>PortFast y BPDU Guard en acceso</span>
+                </label>
+                <label class="check-row">
+                  <input id="saveMemory" type="checkbox" checked />
+                  <span>Agregar write memory</span>
+                </label>
+              </div>
+            </form>
+
+            <section class="panel preview-panel">
+              <div class="panel-title">
+                <h2>Vista previa</h2>
+                <div class="button-row slim">
+                  <button id="copyConfigBtn" type="button">Copiar</button>
+                  <button id="saveConfigBtn" type="button">Guardar</button>
+                </div>
+              </div>
+              <pre id="configPreview"></pre>
+            </section>
+          </div>
+        </section>
+
+        <section id="modelsTab" class="tab-panel">
+          <div class="models-grid">
+            <article class="model-card" data-model-card="Catalyst 2960">
+              <h2>Catalyst 2960 / 2960-X</h2>
+              <p>Acceso capa 2, VLANs, troncales, gestion SVI y endurecimiento basico.</p>
+              <button class="template-btn" data-template="Catalyst 2960" type="button">Usar plantilla</button>
+            </article>
+            <article class="model-card" data-model-card="Catalyst 3560">
+              <h2>Catalyst 3560 / 3750</h2>
+              <p>Switching capa 3 opcional, routing inter-VLAN y compatibilidad IOS clasico.</p>
+              <button class="template-btn" data-template="Catalyst 3560" type="button">Usar plantilla</button>
+            </article>
+            <article class="model-card" data-model-card="Catalyst 9200">
+              <h2>Catalyst 9200 / 9300</h2>
+              <p>IOS XE, sintaxis moderna, mejores practicas para acceso empresarial.</p>
+              <button class="template-btn" data-template="Catalyst 9200" type="button">Usar plantilla</button>
+            </article>
+            <article class="model-card" data-model-card="Small Business CBS">
+              <h2>Small Business CBS</h2>
+              <p>Plantillas base para equipos SMB con variaciones de sintaxis por firmware.</p>
+              <button class="template-btn" data-template="Small Business CBS" type="button">Usar plantilla</button>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
