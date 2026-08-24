@@ -45,10 +45,56 @@ function normalizeProfile(profile) {
     port: Number(profile.port || (protocol === 'ssh' ? 22 : 23)),
     username: String(profile.username || '').trim(),
     password: String(profile.password || ''),
+    sshTimeout: Number(profile.sshTimeout || 45000),
+    legacyCiscoSsh: profile.legacyCiscoSsh === true,
     enableLog: profile.enableLog !== false,
     notes: String(profile.notes || '').trim(),
     updatedAt: new Date().toISOString()
   };
+}
+
+function sshAlgorithms(profile) {
+  const base = {
+    serverHostKey: ['ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512', 'ecdsa-sha2-nistp256', 'ssh-ed25519']
+  };
+
+  if (!profile.legacyCiscoSsh) return base;
+
+  return {
+    kex: {
+      append: [
+        'diffie-hellman-group-exchange-sha1',
+        'diffie-hellman-group14-sha1',
+        'diffie-hellman-group1-sha1'
+      ]
+    },
+    cipher: {
+      append: ['aes256-cbc', 'aes192-cbc', 'aes128-cbc', '3des-cbc']
+    },
+    hmac: {
+      append: ['hmac-sha1-96', 'hmac-md5', 'hmac-md5-96']
+    },
+    serverHostKey: {
+      append: ['ssh-rsa', 'ssh-dss']
+    }
+  };
+}
+
+function sshReadyTimeout(profile) {
+  const timeout = Number(profile.sshTimeout || 45000);
+  return Math.min(Math.max(timeout, 10000), 120000);
+}
+
+function readableSshError(error) {
+  const message = error && error.message ? error.message : String(error || 'Error SSH');
+  if (/handshake/i.test(message) && /timed out/i.test(message)) {
+    return [
+      'SSH no completo el handshake a tiempo.',
+      'Revise que el puerto sea SSH, que el switch tenga SSH habilitado y pruebe aumentar el timeout o activar "Cisco legacy SSH".',
+      `Detalle: ${message}`
+    ].join(' ');
+  }
+  return message;
 }
 
 function parseImportedInventory(filePath) {
@@ -66,10 +112,21 @@ function parseImportedInventory(filePath) {
     .filter(Boolean)
     .filter((line, index) => index > 0 || !line.toLowerCase().startsWith('name,'))
     .map((line) => {
-      const [name, host, model, site, protocol, port, username, notes] = line
+      const [name, host, model, site, protocol, port, username, sshTimeout, legacyCiscoSsh, notes] = line
         .split(',')
         .map((part) => part.trim());
-      return normalizeProfile({ name, host, model, site, protocol, port, username, notes });
+      return normalizeProfile({
+        name,
+        host,
+        model,
+        site,
+        protocol,
+        port,
+        username,
+        sshTimeout,
+        legacyCiscoSsh: /^(true|si|yes|1)$/i.test(legacyCiscoSsh || ''),
+        notes
+      });
     });
 }
 
@@ -86,9 +143,11 @@ function profileToCsv(profiles) {
     profile.protocol,
     profile.port,
     profile.username,
+    profile.sshTimeout,
+    profile.legacyCiscoSsh ? 'true' : 'false',
     profile.notes
   ].map(escape).join(','));
-  return ['name,host,model,site,protocol,port,username,notes', ...rows].join('\n');
+  return ['name,host,model,site,protocol,port,username,sshTimeout,legacyCiscoSsh,notes', ...rows].join('\n');
 }
 
 function createWindow() {
@@ -129,9 +188,10 @@ function closeSession(sessionId, reason = 'Sesion finalizada') {
   if (session.logStream) session.logStream.end();
   sessions.delete(sessionId);
 
+  const status = /^(Error|No se pudo)/i.test(reason) ? 'error' : 'closed';
   sendToWindow(session.window, 'session:status', {
     sessionId,
-    status: 'closed',
+    status,
     message: reason
   });
 }
@@ -206,11 +266,11 @@ function captureCiscoCommand(profile, command) {
       port: Number(profile.port || 22),
       username: profile.username,
       password: profile.password,
-      readyTimeout: 15000,
+      readyTimeout: sshReadyTimeout(profile),
       keepaliveInterval: 30000,
-      algorithms: {
-        serverHostKey: ['ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512', 'ecdsa-sha2-nistp256', 'ssh-ed25519']
-      }
+      tryKeyboard: true,
+      strictVendor: false,
+      algorithms: sshAlgorithms(profile)
     });
   });
 }
@@ -260,7 +320,14 @@ ipcMain.handle('session:connect', async (event, profile) => {
 function connectSsh(session, profile, port) {
   return new Promise((resolve) => {
     const conn = new Client();
+    let settled = false;
     session.conn = conn;
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
 
     conn.on('ready', () => {
       conn.shell({
@@ -275,7 +342,7 @@ function connectSsh(session, profile, port) {
             message: err.message
           });
           closeSession(session.sessionId, 'No se pudo abrir shell SSH');
-          resolve({ ok: false, sessionId: session.sessionId, error: err.message });
+          finish({ ok: false, sessionId: session.sessionId, error: readableSshError(err) });
           return;
         }
 
@@ -301,18 +368,19 @@ function connectSsh(session, profile, port) {
           status: 'connected',
           message: 'Conexion SSH establecida'
         });
-        resolve({ ok: true, sessionId: session.sessionId });
+        finish({ ok: true, sessionId: session.sessionId });
       });
     });
 
     conn.on('error', (err) => {
+      const message = readableSshError(err);
       sendToWindow(session.window, 'session:status', {
         sessionId: session.sessionId,
         status: 'error',
-        message: err.message
+        message
       });
-      closeSession(session.sessionId, 'Error SSH');
-      resolve({ ok: false, sessionId: session.sessionId, error: err.message });
+      closeSession(session.sessionId, message);
+      finish({ ok: false, sessionId: session.sessionId, error: message });
     });
 
     conn.connect({
@@ -320,11 +388,11 @@ function connectSsh(session, profile, port) {
       port,
       username: profile.username,
       password: profile.password,
-      readyTimeout: 15000,
+      readyTimeout: sshReadyTimeout(profile),
       keepaliveInterval: 30000,
-      algorithms: {
-        serverHostKey: ['ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512', 'ecdsa-sha2-nistp256', 'ssh-ed25519']
-      }
+      tryKeyboard: true,
+      strictVendor: false,
+      algorithms: sshAlgorithms(profile)
     });
   });
 }

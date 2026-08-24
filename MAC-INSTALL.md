@@ -19,8 +19,8 @@ chmod +x ./build-mac.sh
 
 Al terminar, los archivos quedan en la carpeta `dist`:
 
-- `Cisco Switch Console-0.2.0.dmg`
-- `Cisco Switch Console-0.2.0-mac.zip`
+- `Cisco Switch Console-0.2.1.dmg`
+- `Cisco Switch Console-0.2.1-mac.zip`
 
 ## Instalar en la Mac
 

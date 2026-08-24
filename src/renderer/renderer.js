@@ -18,6 +18,8 @@ const els = {
   host: document.querySelector('#host'),
   username: document.querySelector('#username'),
   password: document.querySelector('#password'),
+  sshTimeout: document.querySelector('#sshTimeout'),
+  legacyCiscoSsh: document.querySelector('#legacyCiscoSsh'),
   enableLog: document.querySelector('#enableLog'),
   connectBtn: document.querySelector('#connectBtn'),
   disconnectBtn: document.querySelector('#disconnectBtn'),
@@ -199,6 +201,8 @@ function applyProfile(profileId) {
   els.host.value = profile.host || '';
   els.username.value = profile.username || '';
   els.password.value = profile.password || '';
+  els.sshTimeout.value = profile.sshTimeout || 45000;
+  els.legacyCiscoSsh.checked = profile.legacyCiscoSsh === true;
   els.enableLog.checked = profile.enableLog !== false;
   document.querySelector('#model').value = els.connectionModel.value;
   applyTemplate(els.connectionModel.value, false);
@@ -303,6 +307,8 @@ function connectionProfile() {
     host: els.host.value.trim(),
     username: els.username.value.trim(),
     password: els.password.value,
+    sshTimeout: Number(els.sshTimeout.value || 45000),
+    legacyCiscoSsh: els.legacyCiscoSsh.checked,
     enableLog: els.enableLog.checked,
     cols,
     rows
