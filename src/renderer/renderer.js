@@ -16,6 +16,7 @@ const els = {
   host: document.querySelector('#host'),
   username: document.querySelector('#username'),
   password: document.querySelector('#password'),
+  savePassword: document.querySelector('#savePassword'),
   sshTimeout: document.querySelector('#sshTimeout'),
   legacyCiscoSsh: document.querySelector('#legacyCiscoSsh'),
   enableLog: document.querySelector('#enableLog'),
@@ -179,7 +180,25 @@ renderActiveSession();
   renderInventory();
 }
 
+// La contrasena guardada nunca vuelve al formulario: solo se indica que existe.
+function setPasswordField(profile, keepValue = false) {
+  if (!keepValue) els.password.value = '';
+  els.password.placeholder = profile && profile.hasPassword ? 'Guardada (cifrada) - escriba para reemplazar' : '';
+  els.savePassword.checked = Boolean(profile && profile.hasPassword);
+  applySecureStorageStatus();
+}
+
+function applySecureStorageStatus() {
+  const status = state.inventory.secureStorage || { available: true, reason: '' };
+  els.savePassword.disabled = !status.available;
+  els.savePassword.parentElement.title = status.available
+    ? 'Se cifra con el almacen del sistema (DPAPI en Windows, Keychain en macOS).'
+    : status.reason;
+  if (!status.available) els.savePassword.checked = false;
+}
+
 function renderInventory() {
+  applySecureStorageStatus();
   els.savedProfiles.innerHTML = '<option value="">Nuevo perfil</option>';
   state.inventory.profiles
     .slice()
@@ -193,7 +212,7 @@ function renderInventory() {
   els.savedProfiles.value = state.currentProfileId || '';
 
   if (!state.inventory.profiles.length) {
-    els.inventoryRows.innerHTML = '<tr><td colspan="6" class="muted">Sin perfiles guardados.</td></tr>';
+    els.inventoryRows.innerHTML = '<tr><td colspan="7" class="muted">Sin perfiles guardados.</td></tr>';
     return;
   }
 
@@ -205,6 +224,7 @@ function renderInventory() {
         <td>${escapeHtml(profile.model)}</td>
         <td class="muted">${escapeHtml(profile.site)}</td>
         <td>${escapeHtml((profile.protocol || 'ssh').toUpperCase())}:${escapeHtml(profile.port)}</td>
+        <td class="muted">${profile.hasPassword ? 'Cifrada' : '-'}</td>
         <td><button type="button" data-load-profile="${escapeHtml(profile.id)}">Cargar</button></td>
       </tr>
     `)
@@ -232,7 +252,7 @@ function applyProfile(profileId) {
   els.port.value = profile.port || (els.protocol.value === 'ssh' ? 22 : 23);
   els.host.value = profile.host || '';
   els.username.value = profile.username || '';
-  els.password.value = profile.password || '';
+  setPasswordField(profile);
   els.sshTimeout.value = profile.sshTimeout || 45000;
   els.legacyCiscoSsh.checked = profile.legacyCiscoSsh === true;
   els.enableLog.checked = profile.enableLog !== false;
@@ -244,17 +264,23 @@ function applyProfile(profileId) {
 async function saveCurrentProfile() {
   const profile = connectionProfile();
   if (!profile.host) {
-    setStatus('error', 'Ingrese la IP o nombre del switch antes de guardar.');
+    showMessage('Ingrese la IP o nombre del switch antes de guardar.');
     return;
   }
 
   const result = await window.switchConsole.saveProfile(profile);
-  if (result.ok) {
-    state.inventory = result.inventory;
-    state.currentProfileId = result.profile.id;
-    renderInventory();
-    showMessage(`Perfil guardado: ${result.profile.name}`);
-  }
+  if (!result.ok) return;
+  state.inventory = result.inventory;
+  state.currentProfileId = result.profile.id;
+  renderInventory();
+  // Si se cifro, se limpia el campo; si no se guardo, se conserva lo escrito para conectar.
+  setPasswordField(result.profile, !result.passwordStored);
+
+  const status = result.inventory.secureStorage || {};
+  let note = 'sin contrasena guardada';
+  if (result.passwordStored) note = 'contrasena cifrada';
+  else if (profile.savePassword && !status.available) note = `contrasena no guardada: ${status.reason}`;
+  showMessage(`Perfil guardado: ${result.profile.name} (${note}).`);
 }
 
 async function deleteCurrentProfile() {
@@ -279,6 +305,7 @@ els.protocol.addEventListener('change', () => {
 els.savedProfiles.addEventListener('change', () => {
   if (!els.savedProfiles.value) {
     state.currentProfileId = null;
+    setPasswordField(null);
     return;
   }
   applyProfile(els.savedProfiles.value);
@@ -354,6 +381,7 @@ function connectionProfile() {
     host: els.host.value.trim(),
     username: els.username.value.trim(),
     password: els.password.value,
+    savePassword: els.savePassword.checked,
     sshTimeout: Number(els.sshTimeout.value || 45000),
     legacyCiscoSsh: els.legacyCiscoSsh.checked,
     enableLog: els.enableLog.checked,

@@ -1,8 +1,10 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 const { Client } = require('ssh2');
+const { createSanitizedLog } = require('./log-sanitizer');
 
 const sessions = new Map();
 
@@ -16,16 +18,81 @@ function inventoryPath() {
   return path.join(appDataDir(), 'inventory.json');
 }
 
-function readInventory() {
+// Contrasenas de perfiles: cifradas con el almacen del sistema (DPAPI en Windows, Keychain en macOS).
+function secureStorageStatus() {
+  if (!safeStorage.isEncryptionAvailable()) {
+    return { available: false, reason: 'El sistema no ofrece almacenamiento cifrado; las contrasenas no se guardan.' };
+  }
+  if (
+    process.platform === 'linux'
+    && typeof safeStorage.getSelectedStorageBackend === 'function'
+    && safeStorage.getSelectedStorageBackend() === 'basic_text'
+  ) {
+    return { available: false, reason: 'Sin llavero del sistema (gnome-keyring/kwallet); las contrasenas no se guardan.' };
+  }
+  return { available: true, reason: '' };
+}
+
+function encryptSecret(text) {
+  return safeStorage.encryptString(String(text)).toString('base64');
+}
+
+function decryptSecret(encoded) {
   try {
-    const raw = fs.readFileSync(inventoryPath(), 'utf8');
-    const parsed = JSON.parse(raw);
-    return {
-      profiles: Array.isArray(parsed.profiles) ? parsed.profiles : []
-    };
+    return safeStorage.decryptString(Buffer.from(String(encoded), 'base64'));
+  } catch (_error) {
+    return '';
+  }
+}
+
+function readInventory() {
+  let inventory;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(inventoryPath(), 'utf8'));
+    inventory = { profiles: Array.isArray(parsed.profiles) ? parsed.profiles : [] };
   } catch (_error) {
     return { profiles: [] };
   }
+
+  // Migracion: versiones anteriores guardaban "password" en texto plano.
+  let migrated = false;
+  inventory.profiles = inventory.profiles.map((profile) => {
+    if (!Object.prototype.hasOwnProperty.call(profile, 'password')) return profile;
+    const { password, ...rest } = profile;
+    migrated = true;
+    if (password && secureStorageStatus().available) rest.passwordEnc = encryptSecret(password);
+    return rest;
+  });
+  if (migrated) writeInventory(inventory);
+  return inventory;
+}
+
+// Lo que ve el renderer: nunca la contrasena ni el cifrado, solo si existe.
+function toPublicProfile(profile) {
+  const { password: _password, passwordEnc, ...rest } = profile;
+  return { ...rest, hasPassword: Boolean(passwordEnc) };
+}
+
+function publicInventory(inventory) {
+  return {
+    profiles: inventory.profiles.map(toPublicProfile),
+    secureStorage: secureStorageStatus()
+  };
+}
+
+function exportableProfile(profile) {
+  const { password: _password, passwordEnc: _passwordEnc, ...rest } = profile;
+  return rest;
+}
+
+// Contrasena para conectar: la escrita en el formulario o la guardada del perfil (mismo host).
+function resolvePassword(profile) {
+  if (profile.password) return String(profile.password);
+  if (!profile.id) return '';
+  const stored = readInventory().profiles.find((item) => item.id === profile.id);
+  if (!stored || !stored.passwordEnc) return '';
+  if (String(stored.host || '').trim() !== String(profile.host || '').trim()) return '';
+  return decryptSecret(stored.passwordEnc);
 }
 
 function writeInventory(inventory) {
@@ -44,7 +111,6 @@ function normalizeProfile(profile) {
     host: String(profile.host || '').trim(),
     port: Number(profile.port || (protocol === 'ssh' ? 22 : 23)),
     username: String(profile.username || '').trim(),
-    password: String(profile.password || ''),
     sshTimeout: Number(profile.sshTimeout || 45000),
     legacyCiscoSsh: profile.legacyCiscoSsh === true,
     enableLog: profile.enableLog !== false,
@@ -103,7 +169,11 @@ function parseImportedInventory(filePath) {
     const parsed = JSON.parse(content);
     const profiles = Array.isArray(parsed) ? parsed : parsed.profiles;
     if (!Array.isArray(profiles)) throw new Error('JSON sin lista de perfiles');
-    return profiles.map(normalizeProfile);
+    // Exportaciones antiguas pueden traer "password" en texto plano: se cifra al importar.
+    return profiles.map((profile) => ({
+      ...normalizeProfile(profile),
+      password: typeof profile.password === 'string' ? profile.password : ''
+    }));
   }
 
   return content
@@ -127,7 +197,8 @@ function parseImportedInventory(filePath) {
         legacyCiscoSsh: /^(true|si|yes|1)$/i.test(legacyCiscoSsh || ''),
         notes
       });
-    });
+    })
+    .map((profile) => ({ ...profile, password: '' }));
 }
 
 function profileToCsv(profiles) {
@@ -196,14 +267,19 @@ function closeSession(sessionId, reason = 'Sesion finalizada') {
   });
 }
 
-function openLogFile(profileName) {
-  const safeName = String(profileName || 'switch')
+function openLogFile(profile, protocol, port) {
+  const safeName = String(profile.name || profile.host || 'switch')
     .replace(/[^a-z0-9-_]+/gi, '_')
     .replace(/^_+|_+$/g, '') || 'switch';
   const logDir = path.join(app.getPath('documents'), 'Cisco Switch Console Logs');
   fs.mkdirSync(logDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  return fs.createWriteStream(path.join(logDir, `${safeName}_${stamp}.log`), { flags: 'a' });
+  const file = fs.createWriteStream(path.join(logDir, `${safeName}_${stamp}.log`), { flags: 'a' });
+  file.write(`# Cisco Switch Console - ${profile.host}:${port} ${protocol.toUpperCase()} - ${new Date().toISOString()}${os.EOL}`);
+  file.write(`# Credenciales enmascaradas como <oculto>.${os.EOL}`);
+  // Solo se registra lo que devuelve el equipo (incluye el eco de lo tecleado);
+  // lo que se escribe no se registra para no capturar contrasenas sin eco.
+  return createSanitizedLog(file);
 }
 
 function backupDir(profileName) {
@@ -298,7 +374,7 @@ ipcMain.handle('session:connect', async (event, profile) => {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const protocol = profile.protocol === 'telnet' ? 'telnet' : 'ssh';
   const port = Number(profile.port || (protocol === 'ssh' ? 22 : 23));
-  const logStream = profile.enableLog ? openLogFile(profile.name || profile.host) : null;
+  const logStream = profile.enableLog ? openLogFile(profile, protocol, port) : null;
 
   const session = {
     sessionId,
@@ -317,7 +393,7 @@ ipcMain.handle('session:connect', async (event, profile) => {
   });
 
   if (protocol === 'ssh') {
-    return connectSsh(session, profile, port);
+    return connectSsh(session, { ...profile, password: resolvePassword(profile) }, port);
   }
 
   return connectTelnet(session, profile, port);
@@ -453,7 +529,6 @@ function stripTelnetNegotiation(buffer) {
 ipcMain.handle('session:write', async (_event, { sessionId, data }) => {
   const session = sessions.get(sessionId);
   if (!session) return { ok: false, error: 'Sesion no encontrada' };
-  appendLog(session, data);
   if (session.stream) session.stream.write(data);
   if (session.socket) session.socket.write(data);
   return { ok: true };
@@ -485,23 +560,39 @@ ipcMain.handle('dialog:save-config', async (_event, { defaultPath, content }) =>
   return { ok: true, filePath: result.filePath };
 });
 
-ipcMain.handle('inventory:load', async () => readInventory());
+ipcMain.handle('inventory:load', async () => publicInventory(readInventory()));
 
 ipcMain.handle('inventory:save-profile', async (_event, profile) => {
   const inventory = readInventory();
   const normalized = normalizeProfile(profile);
   const index = inventory.profiles.findIndex((item) => item.id === normalized.id);
-  if (index >= 0) inventory.profiles[index] = normalized;
-  else inventory.profiles.push(normalized);
+  const existing = index >= 0 ? inventory.profiles[index] : null;
+  const store = secureStorageStatus();
+
+  // "Recordar contrasena": nueva si se escribio, la anterior si el campo quedo vacio.
+  let passwordEnc = '';
+  if (profile.savePassword && store.available) {
+    if (profile.password) passwordEnc = encryptSecret(profile.password);
+    else if (existing && existing.passwordEnc) passwordEnc = existing.passwordEnc;
+  }
+  const record = passwordEnc ? { ...normalized, passwordEnc } : normalized;
+
+  if (index >= 0) inventory.profiles[index] = record;
+  else inventory.profiles.push(record);
   writeInventory(inventory);
-  return { ok: true, profile: normalized, inventory };
+  return {
+    ok: true,
+    profile: toPublicProfile(record),
+    inventory: publicInventory(inventory),
+    passwordStored: Boolean(passwordEnc)
+  };
 });
 
 ipcMain.handle('inventory:delete-profile', async (_event, profileId) => {
   const inventory = readInventory();
   inventory.profiles = inventory.profiles.filter((profile) => profile.id !== profileId);
   writeInventory(inventory);
-  return { ok: true, inventory };
+  return { ok: true, inventory: publicInventory(inventory) };
 });
 
 ipcMain.handle('inventory:import', async () => {
@@ -515,18 +606,23 @@ ipcMain.handle('inventory:import', async () => {
 
   const imported = parseImportedInventory(result.filePaths[0]);
   const inventory = readInventory();
+  const store = secureStorageStatus();
   const byHost = new Map(inventory.profiles.map((profile) => [profile.host, profile]));
-  imported.forEach((profile) => {
+  imported.forEach(({ password, ...profile }) => {
     const existing = byHost.get(profile.host);
-    if (existing) {
-      byHost.set(profile.host, { ...existing, ...profile, id: existing.id, updatedAt: new Date().toISOString() });
-    } else {
-      byHost.set(profile.host, profile);
-    }
+    // Sin contrasena en el archivo se conserva la guardada (CSV nunca trae contrasena).
+    const passwordEnc = password && store.available
+      ? encryptSecret(password)
+      : (existing && existing.passwordEnc) || '';
+    const merged = existing
+      ? { ...existing, ...profile, id: existing.id, updatedAt: new Date().toISOString() }
+      : profile;
+    delete merged.passwordEnc;
+    byHost.set(profile.host, passwordEnc ? { ...merged, passwordEnc } : merged);
   });
   inventory.profiles = Array.from(byHost.values());
   writeInventory(inventory);
-  return { ok: true, imported: imported.length, inventory };
+  return { ok: true, imported: imported.length, inventory: publicInventory(inventory) };
 });
 
 ipcMain.handle('inventory:export', async (_event, { format }) => {
@@ -538,13 +634,14 @@ ipcMain.handle('inventory:export', async (_event, { format }) => {
   });
   if (result.canceled || !result.filePath) return { ok: false };
 
-  const content = isCsv ? profileToCsv(inventory.profiles) : JSON.stringify(inventory, null, 2);
+  const profiles = inventory.profiles.map(exportableProfile);
+  const content = isCsv ? profileToCsv(profiles) : JSON.stringify({ profiles }, null, 2);
   fs.writeFileSync(result.filePath, content, 'utf8');
   return { ok: true, filePath: result.filePath };
 });
 
 ipcMain.handle('backup:profile', async (_event, profile) => {
-  const normalized = normalizeProfile(profile);
+  const normalized = { ...normalizeProfile(profile), password: resolvePassword(profile) };
   const dir = backupDir(normalized.name || normalized.host);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const running = await captureCiscoCommand(normalized, 'show running-config');

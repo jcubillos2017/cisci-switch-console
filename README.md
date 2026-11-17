@@ -82,6 +82,8 @@ El generador no incluye credenciales por defecto: el secret del usuario local es
 - Preferir SSH sobre Telnet.
 - Usar usuarios individuales y contrasenas robustas.
 - Guardar perfiles sin contrasena cuando el equipo sea compartido.
+- "Recordar contrasena" cifra la clave con el almacen del sistema (`safeStorage`: DPAPI en Windows, Keychain en macOS). La clave cifrada solo se puede leer con el mismo usuario y equipo, y no se incluye al exportar. Los inventarios de versiones anteriores se migran automaticamente al abrir la app.
+- El log de sesion registra solo lo que devuelve el equipo y enmascara secrets, passwords, communities SNMP y keys como `<oculto>`. Los respaldos `.cfg` conservan la configuracion completa (necesaria para restaurar): proteja esa carpeta.
 - Validar las plantillas antes de aplicar cambios en produccion.
 
 ## Solucion de problemas
