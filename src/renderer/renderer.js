@@ -146,6 +146,20 @@ const modelTemplates = {
     nativeVlan: '99',
     note: 'Plantilla IOS XE para acceso empresarial.'
   },
+  'Catalyst 9200CX': {
+    vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n99, Nativa',
+    accessPorts: 'Gi1/0/1-10,20\nGi1/0/11-12,30',
+    trunkPorts: 'Te1/1/3,10,20,30,99',
+    nativeVlan: '99',
+    note: 'Compacto IOS XE (C9200CX-12T/12P): acceso Gi1/0/1-12; uplinks Gi1/1/1-2 cobre, Te1/1/3-4 SFP+, Gi1/1/5 cobre/PD.',
+    // Interfaces reales del equipo: el generador avisa si un rango no existe.
+    interfaces: [
+      { type: 'GigabitEthernet', slot: '1/0/', from: 1, to: 12 },
+      { type: 'GigabitEthernet', slot: '1/1/', from: 1, to: 2 },
+      { type: 'TenGigabitEthernet', slot: '1/1/', from: 3, to: 4 },
+      { type: 'GigabitEthernet', slot: '1/1/', from: 5, to: 5 }
+    ]
+  },
   'Catalyst 9300': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n50, Servidores\n60, WiFi\n99, Nativa',
     accessPorts: 'Gi1/0/1-24,20\nGi1/0/25-36,30\nGi1/0/37-44,60',
@@ -711,6 +725,54 @@ function requiresTrunkEncapsulation(model) {
   return model === 'Catalyst 3560' || model === 'Catalyst 3750';
 }
 
+function isCatalyst9000(model) {
+  return ['Catalyst 9200', 'Catalyst 9200CX', 'Catalyst 9300'].includes(model);
+}
+
+// Nombre completo y abreviatura minima aceptada por IOS (Gi, Gig, GigabitEthernet...).
+const INTERFACE_TYPES = [
+  { name: 'TenGigabitEthernet', min: 2 },
+  { name: 'GigabitEthernet', min: 2 }
+];
+
+function interfaceTypeOf(word) {
+  const lower = String(word).toLowerCase();
+  const type = INTERFACE_TYPES.find((item) => lower.length >= item.min && item.name.toLowerCase().startsWith(lower));
+  return type ? type.name : null;
+}
+
+// Rango "Gi1/0/1-10" o "Te1/1/3" -> { type, slot, from, to }; null si no se reconoce.
+function parseInterfaceRange(range) {
+  const match = /^([A-Za-z]+)\s*(\d+\/\d+\/)(\d+)(?:\s*-\s*(\d+))?$/.exec(String(range).trim());
+  if (!match) return null;
+  const type = interfaceTypeOf(match[1]);
+  if (!type) return null;
+  const from = Number(match[3]);
+  const to = match[4] ? Number(match[4]) : from;
+  return { type, slot: match[2], from, to };
+}
+
+// Avisos de interfaces inexistentes para modelos con numeracion conocida.
+function interfaceWarnings(model) {
+  const spec = (modelTemplates[model] || {}).interfaces;
+  if (!spec) return [];
+  const ranges = [
+    ...parseCsvLines(readValue('accessPorts'), 2).map(([range]) => range),
+    ...parseCsvLines(readValue('trunkPorts'), 2).map(([range]) => range)
+  ];
+  const valid = spec
+    .map((item) => `${item.type === 'TenGigabitEthernet' ? 'Te' : 'Gi'}${item.slot}${item.from}${item.to > item.from ? `-${item.to}` : ''}`)
+    .join(', ');
+  return ranges
+    .filter((range) => {
+      const parsed = parseInterfaceRange(range);
+      if (!parsed) return false;
+      return !spec.some((item) => item.type === parsed.type && item.slot === parsed.slot
+        && parsed.from >= item.from && parsed.to <= item.to && parsed.from <= parsed.to);
+    })
+    .map((range) => `${range} no existe en ${model} (interfaces: ${valid}).`);
+}
+
 function applyTemplate(model, announce = true) {
   const template = modelTemplates[model] || modelTemplates['Catalyst 2960'];
   document.querySelector('#model').value = model;
@@ -731,7 +793,7 @@ function modelSpecificCommands(model) {
     ];
   }
 
-  if (model === 'Catalyst 9200' || model === 'Catalyst 9300') {
+  if (isCatalyst9000(model)) {
     return [
       'spanning-tree mode rapid-pvst',
       'errdisable recovery cause bpduguard',
@@ -764,7 +826,7 @@ function vlanListIncludes(items, vlan) {
 }
 
 function usesScrypt(model) {
-  return model === 'Catalyst 9200' || model === 'Catalyst 9300';
+  return isCatalyst9000(model);
 }
 
 function generateConfig(mask = false) {
@@ -888,6 +950,8 @@ function configIssues() {
   } else {
     warnings.push('Sin rollback: si el cambio corta la sesion necesitara acceso por consola.');
   }
+
+  interfaceWarnings(readValue('model') || 'Catalyst 2960').forEach((warning) => warnings.push(warning));
 
   const mgmtVlan = readValue('mgmtVlan') || '10';
   const nativeVlan = readValue('nativeVlan');
