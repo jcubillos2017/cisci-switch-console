@@ -61,14 +61,14 @@ Tambien puede ejecutar directamente:
 
 ### macOS
 
-El instalador de Mac se genera desde una computadora Mac:
+El `.dmg` se genera en macOS. Sin una Mac, use GitHub Actions: al subir un tag `v*` el workflow `.github/workflows/build.yml` compila los `.dmg` para Apple Silicon (arm64) e Intel (x64) con firma ad-hoc, junto con el instalador de Windows, y los publica en **Releases**:
 
-```bash
-chmod +x ./build-mac.sh
-./build-mac.sh
+```powershell
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
-El archivo `.dmg` queda en `dist`. Ver detalles en `MAC-INSTALL.md`.
+En una Mac tambien se puede compilar localmente con `./build-mac.sh`. Instalacion, avisos de Gatekeeper y consola serial en Mac: ver `MAC-INSTALL.md`.
 
 ## Envio de configuracion con rollback
 

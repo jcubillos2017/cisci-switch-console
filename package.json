@@ -1,6 +1,6 @@
 {
   "name": "cisco-switch-console",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Aplicacion de escritorio tipo PuTTY para configurar switches Cisco IOS.",
   "main": "src/main.js",
   "author": "JCV",
@@ -46,12 +46,14 @@
       ]
     },
     "nsis": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
     "mac": {
       "category": "public.app-category.utilities",
       "identity": null,
+      "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "target": [
         "dmg",
         "zip"

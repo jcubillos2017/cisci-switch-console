@@ -29,18 +29,28 @@ function readableSerialError(error, path) {
   return `Error en el puerto ${path}: ${message}`;
 }
 
+// macOS: /dev/tty.* espera la senal DCD (llamadas entrantes) y un cable de consola no la envia;
+// para conectarse se usa el dispositivo /dev/cu.* equivalente.
+function preferredPath(path, platform = process.platform) {
+  return platform === 'darwin' ? String(path).replace(/^\/dev\/tty\./, '/dev/cu.') : path;
+}
+
 async function listSerialPorts() {
   const mod = loadSerialPort();
   if (!mod) return { ok: false, error: MISSING, ports: [] };
   const ports = await mod.SerialPort.list();
+  const seen = new Set();
   return {
     ok: true,
-    ports: ports.map((port) => ({
-      path: port.path,
-      description: port.friendlyName || port.manufacturer || '',
-      manufacturer: port.manufacturer || '',
-      serialNumber: port.serialNumber || ''
-    }))
+    ports: ports
+      .map((port) => ({ ...port, path: preferredPath(port.path) }))
+      .filter((port) => !seen.has(port.path) && seen.add(port.path))
+      .map((port) => ({
+        path: port.path,
+        description: port.friendlyName || port.manufacturer || '',
+        manufacturer: port.manufacturer || '',
+        serialNumber: port.serialNumber || ''
+      }))
   };
 }
 
@@ -132,4 +142,4 @@ class SerialClient extends EventEmitter {
   }
 }
 
-module.exports = { SerialClient, listSerialPorts, readableSerialError };
+module.exports = { SerialClient, listSerialPorts, readableSerialError, preferredPath };
