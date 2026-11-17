@@ -135,6 +135,10 @@
         </nav>
 
         <section id="terminalTab" class="tab-panel active">
+          <div class="session-bar">
+            <div id="sessionTabs" class="session-tabs" role="tablist" aria-label="Terminales"></div>
+            <button id="addSessionBtn" class="session-add" type="button" title="Agregar terminal (maximo 10)">+</button>
+          </div>
           <div class="terminal-toolbar">
             <div>
               <strong id="sessionTitle">Terminal</strong>
@@ -142,11 +146,13 @@
             </div>
             <div class="button-row slim">
               <button id="clearTerminalBtn" type="button">Limpiar</button>
+              <span id="rollbackBadge" class="badge connecting" hidden></span>
               <button id="backupActiveBtn" type="button">Respaldar</button>
               <button id="sendGeneratedBtn" type="button" disabled>Enviar Config</button>
+              <button id="confirmChangesBtn" type="button" disabled title="reload cancel + write memory">Confirmar y guardar</button>
             </div>
           </div>
-          <div id="terminal"></div>
+          <div id="terminals" class="terminals"></div>
           <div class="command-line">
             <input id="commandInput" placeholder="Escribir comando y presionar Enter" autocomplete="off" />
             <button id="sendCommandBtn" type="button">Enviar</button>
@@ -275,8 +281,23 @@
                   <input id="localUser" value="admin" />
                 </label>
                 <label>
-                  Secret
-                  <input id="localSecret" type="password" value="Cambiar123!" />
+                  Secret usuario local
+                  <input id="localSecret" type="password" placeholder="Obligatorio" autocomplete="new-password" />
+                </label>
+              </div>
+
+              <div class="grid-3">
+                <label>
+                  Enable secret
+                  <input id="enableSecret" type="password" placeholder="Vacio = no modificar" autocomplete="new-password" />
+                </label>
+                <label>
+                  Rollback (minutos)
+                  <input id="reloadMinutes" value="10" inputmode="numeric" />
+                </label>
+                <label class="check-row inline-check">
+                  <input id="useReloadIn" type="checkbox" checked />
+                  <span>Rollback con reload in</span>
                 </label>
               </div>
 
@@ -314,8 +335,12 @@ Gi1/0/13-18,30</textarea>
                   <span>PortFast y BPDU Guard en acceso</span>
                 </label>
                 <label class="check-row">
-                  <input id="saveMemory" type="checkbox" checked />
-                  <span>Agregar write memory</span>
+                  <input id="replaceRsaKeys" type="checkbox" />
+                  <span>Reemplazar llaves RSA existentes</span>
+                </label>
+                <label class="check-row">
+                  <input id="saveMemory" type="checkbox" />
+                  <span>Agregar write memory (solo sin rollback)</span>
                 </label>
               </div>
             </form>
@@ -328,7 +353,9 @@ Gi1/0/13-18,30</textarea>
                   <button id="saveConfigBtn" type="button">Guardar</button>
                 </div>
               </div>
+              <div id="configIssues" class="config-issues"></div>
               <pre id="configPreview"></pre>
+              <p id="rollbackNote" class="panel-note rollback-note"></p>
             </section>
           </div>
         </section>
@@ -361,6 +388,8 @@ Gi1/0/13-18,30</textarea>
     </main>
 
     <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="./cisco-runner.js"></script>
+    <script src="./terminal-sessions.js"></script>
     <script src="./renderer.js"></script>
   </body>
 </html>

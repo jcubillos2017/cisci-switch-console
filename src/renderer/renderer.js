@@ -1,6 +1,4 @@
 const state = {
-  sessionId: null,
-  connected: false,
   lastGeneratedConfig: '',
   inventory: { profiles: [] },
   currentProfileId: null,
@@ -47,25 +45,50 @@ const els = {
   configForm: document.querySelector('#configForm'),
   configPreview: document.querySelector('#configPreview'),
   copyConfigBtn: document.querySelector('#copyConfigBtn'),
-  saveConfigBtn: document.querySelector('#saveConfigBtn')
+  saveConfigBtn: document.querySelector('#saveConfigBtn'),
+  confirmChangesBtn: document.querySelector('#confirmChangesBtn'),
+  rollbackBadge: document.querySelector('#rollbackBadge'),
+  configIssues: document.querySelector('#configIssues'),
+  rollbackNote: document.querySelector('#rollbackNote')
 };
 
-const term = new Terminal({
-  cursorBlink: true,
-  convertEol: true,
-  fontFamily: '"Cascadia Mono", Consolas, monospace',
-  fontSize: 13,
-  theme: {
-    background: '#05080a',
-    foreground: '#d9e6ef',
-    cursor: '#5eead4',
-    selectionBackground: '#2f5f87'
-  }
+// Rollbacks programados por host (sobreviven a la desconexion de la terminal).
+const rollbacks = new Map();
+
+const sessions = window.TerminalSessions.create({
+  container: document.querySelector('#terminals'),
+  tabBar: document.querySelector('#sessionTabs'),
+  addButton: document.querySelector('#addSessionBtn'),
+  api: window.switchConsole,
+  initialSlots: 5,
+  maxSlots: 10,
+  terminalOptions: {
+    cursorBlink: true,
+    convertEol: true,
+    fontFamily: '"Cascadia Mono", Consolas, monospace',
+    fontSize: 13,
+    theme: {
+      background: '#05080a',
+      foreground: '#d9e6ef',
+      cursor: '#5eead4',
+      selectionBackground: '#2f5f87'
+    }
+  },
+  tabFlags: (slot) => ({ rollback: Boolean(slot.host && rollbacks.has(slot.host)), running: slot.scriptRunning }),
+  onChange: () => renderActiveSession()
 });
 
-term.open(document.querySelector('#terminal'));
-term.writeln('Cisco Switch Console listo.');
-term.writeln('Complete los datos de conexion y presione Conectar.');
+// "reload in": responder "no" a guardar (guardar anularia el rollback) y confirmar la programacion.
+const RELOAD_IN_ANSWERS = [
+  { pattern: /Save\?\s*\[yes\/no\]:\s*$/i, reply: 'no\r' },
+  { pattern: /Proceed with reload\?\s*\[confirm\]\s*$/i, reply: '\r' }
+];
+
+const WEAK_SECRETS = [
+  'cambiar123!', 'cambiar_enable_secret', 'cisco', 'cisco123', 'admin', 'admin123',
+  'password', 'class', 'secret', '12345678', 'suclavesegura'
+];
+
 
 const modelTemplates = {
   'Catalyst 2960': {
@@ -113,7 +136,7 @@ const modelTemplates = {
 };
 
 function terminalSize() {
-  const terminalElement = document.querySelector('#terminal');
+  const terminalElement = document.querySelector('#terminals');
   const width = terminalElement.clientWidth - 24;
   const height = terminalElement.clientHeight - 24;
   const cols = Math.max(80, Math.floor(width / 7.2));
@@ -122,9 +145,7 @@ function terminalSize() {
 }
 
 function resizeTerminal() {
-  const { cols, rows } = terminalSize();
-  term.resize(cols, rows);
-  if (state.sessionId) window.switchConsole.resize(state.sessionId, cols, rows);
+  sessions.resizeAll(terminalSize());
 }
 
 window.addEventListener('resize', resizeTerminal);
@@ -142,8 +163,19 @@ function showMessage(message) {
   els.sessionSubtitle.textContent = message;
 }
 
+// Mensaje de una terminal: se guarda en ella y se muestra si es la activa.
+function slotMessage(slot, message) {
+  slot.message = message;
+  if (slot === sessions.active()) els.sessionSubtitle.textContent = message;
+}
+
+function slotLabel(slot) {
+  return `T${slot.number} ${slot.name || slot.host}`.trim();
+}
+
 async function loadInventory() {
   state.inventory = await window.switchConsole.loadInventory();
+renderActiveSession();
   renderInventory();
 }
 
@@ -283,6 +315,11 @@ document.querySelectorAll('.tab').forEach((button) => {
 });
 
 function setStatus(status, message) {
+  setStatusBadge(status);
+  els.sessionSubtitle.textContent = message || '';
+}
+
+function setStatusBadge(status) {
   els.statusBadge.className = `badge ${status}`;
   const labels = {
     idle: 'Sin sesion',
@@ -292,7 +329,17 @@ function setStatus(status, message) {
     closed: 'Cerrada'
   };
   els.statusBadge.textContent = labels[status] || status;
-  els.sessionSubtitle.textContent = message || '';
+}
+
+function renderActiveSession() {
+  const slot = sessions.active();
+  els.sessionTitle.textContent = slot.sessionId || slot.host
+    ? `Terminal ${slot.number} - ${slot.name || slot.host}`
+    : `Terminal ${slot.number}`;
+  els.sessionSubtitle.textContent = slot.message;
+  setStatusBadge(slot.status);
+  els.disconnectBtn.disabled = !slot.sessionId;
+  renderRollback();
 }
 
 function connectionProfile() {
@@ -318,63 +365,70 @@ function connectionProfile() {
 els.connectBtn.addEventListener('click', async () => {
   const profile = connectionProfile();
   if (!profile.host) {
-    setStatus('error', 'Ingrese la IP o nombre del switch.');
+    showMessage('Ingrese la IP o nombre del switch.');
     return;
   }
 
-  setStatus('connecting', `Conectando a ${profile.host}`);
-  term.writeln('');
-  term.writeln(`--- Conectando a ${profile.host}:${profile.port} por ${profile.protocol.toUpperCase()} ---`);
-  const result = await window.switchConsole.connect(profile);
-  if (!result.ok) {
-    term.writeln(`Error: ${result.error || 'no se pudo conectar'}`);
+  // La pestana Terminal debe estar visible antes de crear o mostrar una terminal.
+  document.querySelector('[data-tab="terminal"]').click();
+
+  // Usa la terminal activa si esta libre; si no, la primera libre (o agrega una).
+  let slot = sessions.active();
+  if (slot.sessionId) slot = sessions.findFree() || sessions.addSlot();
+  if (!slot) {
+    showMessage(`Las ${sessions.maxSlots} terminales estan ocupadas. Desconecte una para continuar.`);
     return;
   }
 
-  state.sessionId = result.sessionId;
-  state.connected = true;
-  els.connectBtn.disabled = true;
-  els.disconnectBtn.disabled = false;
-  els.sendGeneratedBtn.disabled = false;
-  els.sessionTitle.textContent = profile.name || profile.host;
+  const duplicate = sessions.slots.find((other) => other !== slot && other.sessionId && other.host === profile.host);
+  if (duplicate) slotMessage(slot, `Aviso: ${profile.host} ya esta abierto en la terminal ${duplicate.number}.`);
+
+  sessions.select(slot.index);
+  await sessions.connect(slot, profile);
 });
 
 els.disconnectBtn.addEventListener('click', async () => {
-  if (!state.sessionId) return;
-  await window.switchConsole.disconnect(state.sessionId);
+  await sessions.disconnect(sessions.active());
 });
 
-term.onData((data) => {
-  if (state.sessionId && state.connected) {
-    window.switchConsole.write(state.sessionId, data);
-  }
+document.querySelector('#addSessionBtn').addEventListener('click', () => {
+  const slot = sessions.addSlot();
+  if (slot) sessions.select(slot.index);
 });
 
-window.switchConsole.onData(({ sessionId, data }) => {
-  if (sessionId !== state.sessionId) return;
-  term.write(data);
-});
-
-window.switchConsole.onStatus(({ sessionId, status, message }) => {
-  if (state.sessionId && sessionId !== state.sessionId) return;
-  setStatus(status, message);
-  if (status === 'closed' || status === 'error') {
-    state.connected = false;
-    state.sessionId = null;
-    els.connectBtn.disabled = false;
-    els.disconnectBtn.disabled = true;
-    els.sendGeneratedBtn.disabled = true;
-  }
-});
+// Alt+1..9 y Alt+0 (terminal 10) cambian de terminal.
+document.addEventListener('keydown', (event) => {
+  if (!event.altKey || event.ctrlKey || event.metaKey || !/^Digit[0-9]$/.test(event.code)) return;
+  const digit = Number(event.code.slice(5));
+  const index = digit === 0 ? 9 : digit - 1;
+  if (!sessions.slots[index]) return;
+  event.preventDefault();
+  document.querySelector('[data-tab="terminal"]').click();
+  sessions.select(index);
+}, true);
 
 function sendCommand(command) {
   if (!command.trim()) return;
-  if (!state.sessionId || !state.connected) {
-    term.writeln('');
-    term.writeln('No hay una sesion activa.');
+  const slot = sessions.active();
+  if (!slot.sessionId || !slot.connected) {
+    slot.term.writeln('');
+    slot.term.writeln('No hay una sesion activa en esta terminal.');
     return;
   }
-  window.switchConsole.write(state.sessionId, `${command}\r`);
+  if (slot.scriptRunning) {
+    slotMessage(slot, 'Hay un envio en curso. Espere o presione "Detener envio".');
+    return;
+  }
+  if (rollbacks.has(slot.host) && /^\s*(wr|write|copy\s+run)/i.test(command)) {
+    const proceed = window.confirm([
+      'Hay un rollback programado (reload in).',
+      'Guardar ahora hace que el reload reinicie con la configuracion nueva y se pierde la proteccion.',
+      '',
+      'Use "Confirmar y guardar" para cancelar el reload y guardar. Guardar de todos modos?'
+    ].join('\n'));
+    if (!proceed) return;
+  }
+  sessions.write(slot, `${command}\r`);
 }
 
 function setBackupStatus(status, message) {
@@ -467,7 +521,7 @@ document.querySelectorAll('.macro').forEach((button) => {
   button.addEventListener('click', () => sendCommand(button.dataset.command));
 });
 
-els.clearTerminalBtn.addEventListener('click', () => term.clear());
+els.clearTerminalBtn.addEventListener('click', () => sessions.active().term.clear());
 els.backupActiveBtn.addEventListener('click', backupCurrentProfile);
 els.backupSelectedBtn.addEventListener('click', backupCurrentProfile);
 els.compareTextBtn.addEventListener('click', compareConfigs);
@@ -528,7 +582,23 @@ function modelSpecificCommands(model) {
   return ['spanning-tree mode rapid-pvst'];
 }
 
-function generateConfig() {
+function readRaw(id) {
+  return document.querySelector(`#${id}`).value;
+}
+
+function vlanListIncludes(items, vlan) {
+  const target = Number(vlan);
+  return items.some((item) => {
+    const [start, end] = String(item).split('-').map(Number);
+    return Number.isFinite(end) ? target >= start && target <= end : target === start;
+  });
+}
+
+function usesScrypt(model) {
+  return model === 'Catalyst 9200' || model === 'Catalyst 9300';
+}
+
+function generateConfig(mask = false) {
   const model = readValue('model') || 'Catalyst 2960';
   const hostname = readValue('cfgHostname') || 'SWITCH';
   const mgmtVlan = readValue('mgmtVlan') || '10';
@@ -537,7 +607,11 @@ function generateConfig() {
   const gateway = readValue('gateway');
   const domainName = readValue('domainName') || 'local';
   const localUser = readValue('localUser') || 'admin';
-  const localSecret = readValue('localSecret') || 'Cambiar123!';
+  const localSecret = readRaw('localSecret');
+  const enableSecret = readRaw('enableSecret');
+  const shown = (value) => (mask ? '********' : value);
+  const secretKeyword = usesScrypt(model) ? 'algorithm-type scrypt secret' : 'secret';
+  const useReloadIn = readChecked('useReloadIn');
   const vlans = parseCsvLines(readValue('vlans'), 2);
   const accessPorts = parseCsvLines(readValue('accessPorts'), 2);
   const trunkPorts = parseCsvLines(readValue('trunkPorts'), 2);
@@ -547,11 +621,10 @@ function generateConfig() {
     `hostname ${hostname}`,
     'no ip domain-lookup',
     `ip domain-name ${domainName}`,
-    'service password-encryption',
-    'enable secret Cambiar_Enable_Secret',
-    ...modelSpecificCommands(model),
-    ''
+    'service password-encryption'
   ];
+  if (enableSecret) lines.push(`enable ${secretKeyword} ${shown(enableSecret)}`);
+  lines.push(...modelSpecificCommands(model), '');
 
   vlans.forEach(([id, name]) => {
     lines.push(`vlan ${id}`, ` name ${name}`, ' exit');
@@ -562,7 +635,9 @@ function generateConfig() {
   lines.push(' no shutdown', ' exit');
   if (gateway) lines.push(`ip default-gateway ${gateway}`);
 
-  lines.push('', `username ${localUser} privilege 15 secret ${localSecret}`);
+  lines.push('');
+  if (localSecret) lines.push(`username ${localUser} privilege 15 ${secretKeyword} ${shown(localSecret)}`);
+  else lines.push('! username omitido: defina el secret del usuario local');
 
   if (readChecked('enableSsh')) {
     lines.push(
@@ -610,13 +685,274 @@ function generateConfig() {
     'end'
   );
 
-  if (readChecked('saveMemory')) lines.push('write memory');
+  // Con rollback no se guarda: el guardado se hace con "Confirmar y guardar" tras validar.
+  if (readChecked('saveMemory') && !useReloadIn) lines.push('write memory');
   return lines.join('\n');
+}
+
+function configIssues() {
+  const blocking = [];
+  const warnings = [];
+  const localSecret = readRaw('localSecret');
+  const enableSecret = readRaw('enableSecret');
+
+  const checkSecret = (label, value) => {
+    if (value.includes('?')) blocking.push(`${label}: no puede contener "?" (la CLI de IOS lo interpreta como ayuda).`);
+    if (value !== value.trim()) blocking.push(`${label}: tiene espacios al inicio o al final.`);
+    if (WEAK_SECRETS.includes(value.trim().toLowerCase())) blocking.push(`${label}: es un valor por defecto o conocido.`);
+    else if (value.length < 8) warnings.push(`${label}: tiene menos de 8 caracteres.`);
+  };
+
+  if (!localSecret) {
+    blocking.push('Defina el secret del usuario local: las VTY usan "login local" y sin usuario puede quedar sin acceso.');
+  } else {
+    checkSecret('Secret usuario local', localSecret);
+  }
+  if (enableSecret) {
+    checkSecret('Enable secret', enableSecret);
+    if (enableSecret === localSecret) warnings.push('Enable secret y secret del usuario local son iguales.');
+  }
+
+  const minutes = Number(readValue('reloadMinutes'));
+  if (readChecked('useReloadIn')) {
+    if (!Number.isInteger(minutes) || minutes < 3 || minutes > 60) blocking.push('Rollback: indique entre 3 y 60 minutos.');
+  } else {
+    warnings.push('Sin rollback: si el cambio corta la sesion necesitara acceso por consola.');
+  }
+
+  const mgmtVlan = readValue('mgmtVlan') || '10';
+  parseCsvLines(readValue('trunkPorts'), 2).forEach(([range, ...allowed]) => {
+    if (allowed.length && !vlanListIncludes(allowed, mgmtVlan)) {
+      warnings.push(`Troncal ${range}: la VLAN de gestion ${mgmtVlan} no esta en "allowed vlan".`);
+    }
+  });
+
+  return { blocking, warnings };
+}
+
+function configRisks(slot) {
+  const risks = [];
+  const mgmtVlan = readValue('mgmtVlan') || '10';
+  if (slot.protocol === 'telnet') risks.push('La sesion es Telnet: los secrets viajan en texto plano.');
+  if (readValue('mgmtIp')) risks.push(`interface vlan ${mgmtVlan}: reconfigura la SVI de gestion; si cambia la IP o la VLAN se corta la sesion.`);
+  if (readValue('gateway')) risks.push('ip default-gateway: un gateway incorrecto corta el acceso desde otras redes.');
+  const access = parseCsvLines(readValue('accessPorts'), 2).map(([range]) => range);
+  if (access.length) risks.push(`Modo access en ${access.join(', ')}: si incluye su uplink, pierde la sesion.`);
+  const trunks = parseCsvLines(readValue('trunkPorts'), 2).map(([range]) => range);
+  if (trunks.length) risks.push(`Troncales ${trunks.join(', ')}: "allowed vlan" reemplaza la lista actual.`);
+  if (state.lastGeneratedConfig.includes('spanning-tree mode')) risks.push('spanning-tree mode: cambiar el modo provoca reconvergencia en todas las VLAN.');
+  risks.push(readChecked('disableTelnet') ? 'line vty 0 15: login local y solo SSH.' : 'line vty 0 15: login local.');
+  if (readChecked('enableSsh') && readChecked('replaceRsaKeys')) risks.push('Reemplaza las llaves RSA: cambia la huella SSH del equipo.');
+  return risks;
 }
 
 function refreshPreview() {
   state.lastGeneratedConfig = generateConfig();
-  els.configPreview.textContent = state.lastGeneratedConfig;
+  els.configPreview.textContent = generateConfig(true);
+
+  const useReloadIn = readChecked('useReloadIn');
+  document.querySelector('#saveMemory').disabled = useReloadIn;
+
+  const { blocking, warnings } = configIssues();
+  els.configIssues.innerHTML = [
+    ...blocking.map((text) => `<div class="issue blocking">${escapeHtml(text)}</div>`),
+    ...warnings.map((text) => `<div class="issue warning">${escapeHtml(text)}</div>`)
+  ].join('');
+
+  els.rollbackNote.textContent = useReloadIn
+    ? `"Enviar Config" ejecuta antes "reload in ${readValue('reloadMinutes') || 10}" (responde "no" a guardar). Si pierde el acceso, el switch vuelve solo a la startup-config. Tras validar use "Confirmar y guardar".`
+    : 'Sin rollback: la configuracion se aplica directamente sobre la running-config.';
+}
+
+function updateActionButtons() {
+  const slot = sessions.active();
+  const live = Boolean(slot.sessionId && slot.connected);
+  els.sendGeneratedBtn.disabled = !live && !slot.scriptRunning;
+  els.sendGeneratedBtn.textContent = slot.scriptRunning ? 'Detener envio' : 'Enviar Config';
+  els.confirmChangesBtn.disabled = !(live && !slot.scriptRunning && rollbacks.has(slot.host));
+}
+
+function startRollback(host, minutes) {
+  rollbacks.set(host, Date.now() + minutes * 60000);
+  sessions.render();
+  renderRollback();
+}
+
+function clearRollback(host) {
+  rollbacks.delete(host);
+  sessions.render();
+  renderRollback();
+}
+
+function formatRemaining(ms) {
+  const minutes = String(Math.floor(ms / 60000)).padStart(2, '0');
+  const seconds = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+function renderRollback() {
+  const now = Date.now();
+  let expired = false;
+  for (const [host, deadline] of rollbacks) {
+    if (deadline > now) continue;
+    rollbacks.delete(host);
+    expired = true;
+    sessions.slots
+      .filter((slot) => slot.host === host)
+      .forEach((slot) => {
+        slotMessage(slot, `Rollback vencido: ${host} se reinicia con la startup-config.`);
+        if (slot.sessionId) slot.term.writeln(`\r\n\x1b[33m*** Rollback vencido: ${host} se reinicia con la startup-config. ***\x1b[0m`);
+      });
+  }
+  if (expired) sessions.render();
+
+  const slot = sessions.active();
+  const deadline = slot.host ? rollbacks.get(slot.host) : null;
+  const others = rollbacks.size - (deadline ? 1 : 0);
+  if (!deadline && !others) {
+    els.rollbackBadge.hidden = true;
+  } else {
+    els.rollbackBadge.hidden = false;
+    els.rollbackBadge.textContent = [
+      deadline ? `Rollback ${slot.host} ${formatRemaining(deadline - now)}` : '',
+      others ? `${deadline ? '+' : ''}${others} en otras terminales` : ''
+    ].filter(Boolean).join(' ');
+    els.rollbackBadge.title = Array.from(rollbacks.entries())
+      .map(([host, time]) => `${host}: ${formatRemaining(time - now)}`)
+      .join('\n');
+  }
+  updateActionButtons();
+}
+
+setInterval(renderRollback, 1000);
+
+async function runScript(slot, task) {
+  slot.scriptRunning = true;
+  sessions.render();
+  updateActionButtons();
+  try {
+    return await task();
+  } finally {
+    slot.scriptRunning = false;
+    sessions.render();
+    updateActionButtons();
+  }
+}
+
+async function ensurePrivilegedExec(slot) {
+  const [probe] = await slot.runner.run([{ command: '', display: '(prompt)', timeout: 8000 }]);
+  if (!probe.prompt.privileged) {
+    throw new Error('El equipo esta en user EXEC (>). Ejecute "enable" y vuelva a intentar.');
+  }
+  if (probe.prompt.mode) await slot.runner.run([{ command: 'end', timeout: 8000 }]);
+}
+
+function describeFailure(slot, error) {
+  const where = error.step ? ` (linea: "${error.step.display || error.step.command}")` : '';
+  const parts = [`${error.message}${where}`];
+  if (error.kind === 'timeout') parts.push('Si el cambio corto la sesion, reconecte despues de que venza el rollback.');
+  if (rollbacks.has(slot.host)) parts.push('El rollback sigue programado: corrija y reenvie, o deje que venza para volver a la startup-config.');
+  return parts.join(' ');
+}
+
+function reportFailure(slot, prefix, error) {
+  const message = `${prefix}: ${describeFailure(slot, error)}`;
+  slotMessage(slot, message);
+  slot.term.writeln(`\r\n\x1b[31m*** ${message} ***\x1b[0m`);
+}
+
+async function sendGeneratedConfig() {
+  const slot = sessions.active();
+  if (slot.scriptRunning) {
+    slot.runner.abort('Envio detenido por el usuario.');
+    return;
+  }
+  if (!slot.sessionId || !slot.connected) return;
+
+  refreshPreview();
+  const { blocking, warnings } = configIssues();
+  if (blocking.length) {
+    window.alert(`No se puede enviar la configuracion:\n\n- ${blocking.join('\n- ')}`);
+    document.querySelector('[data-tab="wizard"]').click();
+    return;
+  }
+
+  const host = slot.host;
+  const useReloadIn = readChecked('useReloadIn');
+  const minutes = Number(readValue('reloadMinutes'));
+  const summary = [
+    `Enviar la configuracion generada a ${slotLabel(slot)} (${host})?`,
+    '',
+    useReloadIn
+      ? `Proteccion: reload in ${minutes} (rollback automatico si pierde el acceso).`
+      : 'SIN rollback: si pierde la sesion necesitara acceso por consola.',
+    '',
+    'Puede cortar la sesion o afectar trafico:',
+    ...configRisks(slot).map((risk) => `- ${risk}`),
+    ...(warnings.length ? ['', 'Advertencias:', ...warnings.map((warning) => `- ${warning}`)] : [])
+  ].join('\n');
+  if (!window.confirm(summary)) return;
+
+  const realLines = state.lastGeneratedConfig.split('\n');
+  const maskedLines = generateConfig(true).split('\n');
+  const rsaAnswer = {
+    pattern: /replace them\?\s*\[yes\/no\]:\s*$/i,
+    reply: readChecked('replaceRsaKeys') ? 'yes\r' : 'no\r'
+  };
+  const steps = realLines
+    .map((line, index) => ({ command: line, display: (maskedLines[index] || '').trim() }))
+    .filter((step) => step.command.trim() && !step.command.trim().startsWith('!'))
+    .map((step) => (/^\s*crypto key generate/i.test(step.command) ? { ...step, answers: [rsaAnswer] } : step));
+
+  await runScript(slot, async () => {
+    try {
+      await ensurePrivilegedExec(slot);
+      if (useReloadIn) {
+        slotMessage(slot, `Programando reload in ${minutes}...`);
+        await slot.runner.run([{ command: `reload in ${minutes}`, answers: RELOAD_IN_ANSWERS, timeout: 20000 }]);
+        startRollback(host, minutes);
+      }
+      await slot.runner.run(steps, {
+        onProgress: (index, total, step) => slotMessage(slot, `Enviando ${index + 1}/${total}: ${step.display}`)
+      });
+      if (useReloadIn) {
+        slotMessage(slot, 'Configuracion aplicada. Valide y presione "Confirmar y guardar" antes de que venza el rollback.');
+        slot.term.writeln('\r\n\x1b[33m*** Config aplicada. Valide (show ip interface brief / show vlan brief / show interfaces trunk) y use "Confirmar y guardar". ***\x1b[0m');
+      } else {
+        slotMessage(slot, 'Configuracion aplicada.');
+      }
+    } catch (error) {
+      reportFailure(slot, 'Envio detenido', error);
+    }
+  });
+}
+
+async function confirmChanges() {
+  const slot = sessions.active();
+  if (!slot.connected || !rollbacks.has(slot.host)) return;
+  const host = slot.host;
+  const proceed = window.confirm([
+    `Confirmar cambios en ${slotLabel(slot)} (${host})?`,
+    '',
+    'Se ejecutara:',
+    '  reload cancel',
+    '  write memory',
+    '',
+    'Hagalo solo si valido la configuracion y mantiene acceso de gestion.'
+  ].join('\n'));
+  if (!proceed) return;
+
+  await runScript(slot, async () => {
+    try {
+      await ensurePrivilegedExec(slot);
+      await slot.runner.run([{ command: 'reload cancel', timeout: 15000 }]);
+      clearRollback(host);
+      await slot.runner.run([{ command: 'write memory' }]);
+      slotMessage(slot, 'Rollback cancelado y configuracion guardada en startup-config.');
+    } catch (error) {
+      reportFailure(slot, 'No se pudo confirmar', error);
+    }
+  });
 }
 
 els.configForm.addEventListener('input', refreshPreview);
@@ -647,15 +983,8 @@ els.saveConfigBtn.addEventListener('click', async () => {
   });
 });
 
-els.sendGeneratedBtn.addEventListener('click', async () => {
-  if (!state.sessionId || !state.connected) return;
-  const confirmed = window.confirm('Enviar la configuracion generada a la sesion activa? Revise la vista previa antes de continuar.');
-  if (!confirmed) return;
-  const commands = state.lastGeneratedConfig.split('\n');
-  for (const command of commands) {
-    await window.switchConsole.write(state.sessionId, `${command}\r`);
-    await new Promise((resolve) => setTimeout(resolve, 120));
-  }
-});
+els.sendGeneratedBtn.addEventListener('click', sendGeneratedConfig);
+els.confirmChangesBtn.addEventListener('click', confirmChanges);
 
 loadInventory();
+renderActiveSession();

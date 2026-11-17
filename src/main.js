@@ -289,7 +289,13 @@ function cleanCiscoOutput(output, command) {
 
 ipcMain.handle('session:connect', async (event, profile) => {
   const window = BrowserWindow.fromWebContents(event.sender);
-  const sessionId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // El renderer puede proponer el id (una terminal = una sesion) para enrutar datos desde el primer byte.
+  const requestedId = typeof profile.sessionId === 'string' && /^[\w-]{1,64}$/.test(profile.sessionId)
+    ? profile.sessionId
+    : null;
+  const sessionId = requestedId && !sessions.has(requestedId)
+    ? requestedId
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const protocol = profile.protocol === 'telnet' ? 'telnet' : 'ssh';
   const port = Number(profile.port || (protocol === 'ssh' ? 22 : 23));
   const logStream = profile.enableLog ? openLogFile(profile.name || profile.host) : null;

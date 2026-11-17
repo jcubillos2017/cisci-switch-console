@@ -6,6 +6,7 @@ Aplicacion de escritorio tipo PuTTY para administrar switches Cisco IOS por SSH 
 
 - Conexion interactiva SSH y Telnet.
 - Terminal integrada para ejecutar comandos en switches Cisco.
+- Terminales multiples: 5 al iniciar y hasta 10 con el boton `+`; cambio rapido con `Alt+1`..`Alt+9` y `Alt+0`.
 - Perfiles por equipo, modelo, IP, puerto y credenciales.
 - Inventario persistente de switches.
 - Importacion/exportacion de inventario en JSON y CSV.
@@ -63,6 +64,18 @@ chmod +x ./build-mac.sh
 ```
 
 El archivo `.dmg` queda en `dist`. Ver detalles en `MAC-INSTALL.md`.
+
+## Envio de configuracion con rollback
+
+"Enviar Config" aplica la configuracion generada linea a linea sobre la sesion activa:
+
+1. Verifica que el equipo este en privileged EXEC (`#`).
+2. Programa `reload in N` (responde `no` a guardar) como red de seguridad.
+3. Envia cada comando esperando el prompt; se detiene ante `% Invalid input`, `% Incomplete command`, timeouts o preguntas no previstas.
+4. Responde automaticamente la pregunta de `crypto key generate rsa` cuando ya existen llaves (por defecto: no reemplazar).
+5. Tras validar, "Confirmar y guardar" ejecuta `reload cancel` y `write memory`. Si pierde el acceso, el switch vuelve solo a la startup-config al vencer el plazo.
+
+El generador no incluye credenciales por defecto: el secret del usuario local es obligatorio y el enable secret solo se modifica si se completa. En Catalyst 9200/9300 se usa `algorithm-type scrypt`.
 
 ## Seguridad recomendada
 

@@ -298,7 +298,7 @@ label {
 
 #terminalTab {
   display: none;
-  grid-template-rows: 54px 1fr 56px;
+  grid-template-rows: 44px 54px 1fr 56px;
   min-height: 0;
 }
 
@@ -322,10 +322,105 @@ label {
   font-size: 12px;
 }
 
-#terminal {
+.terminals {
   min-height: 0;
   padding: 10px;
   background: var(--terminal);
+}
+
+.term-pane {
+  display: none;
+  height: 100%;
+}
+
+.term-pane.active {
+  display: block;
+}
+
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border-bottom: 1px solid var(--line);
+  background: #111923;
+  padding: 6px 14px;
+}
+
+.session-tabs {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.session-tab {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  max-width: 190px;
+  padding: 0 10px;
+  background: transparent;
+  font-size: 12px;
+}
+
+.session-tab.active {
+  border-color: var(--blue);
+  background: var(--surface-2);
+}
+
+.session-tab .dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.5;
+}
+
+.session-tab[data-status="connected"] .dot {
+  background: var(--green);
+  opacity: 1;
+}
+
+.session-tab[data-status="connecting"] .dot {
+  background: var(--amber);
+  opacity: 1;
+}
+
+.session-tab[data-status="error"] .dot {
+  background: var(--red);
+  opacity: 1;
+}
+
+.session-tab .tab-num {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.session-tab .tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-tab .tab-flag {
+  border: 1px solid var(--amber);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: #ffd27c;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.session-add {
+  flex: none;
+  width: 34px;
+  min-height: 30px;
+  padding: 0;
+  font-size: 16px;
 }
 
 .xterm {
@@ -448,8 +543,45 @@ label {
 
 .preview-panel {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto 1fr auto;
   min-height: 620px;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.config-issues:empty {
+  display: none;
+}
+
+.config-issues {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.config-issues .issue {
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.config-issues .issue.blocking {
+  border-left-color: var(--red);
+  color: #ff9e9e;
+}
+
+.config-issues .issue.warning {
+  border-left-color: var(--amber);
+  color: #ffd27c;
+}
+
+.rollback-note {
+  margin: 10px 0 0;
+  font-size: 12px;
 }
 
 #configPreview {
