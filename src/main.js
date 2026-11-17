@@ -1,10 +1,10 @@
 const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const net = require('net');
 const os = require('os');
 const { Client } = require('ssh2');
 const { createSanitizedLog, renderLine } = require('./log-sanitizer');
+const { TelnetClient } = require('./telnet-client');
 const { create: createRunner } = require('./renderer/cisco-runner');
 
 const sessions = new Map();
@@ -264,7 +264,7 @@ function closeSession(sessionId, reason = 'Sesion finalizada') {
 
   if (session.stream) session.stream.end();
   if (session.conn) session.conn.end();
-  if (session.socket) session.socket.end();
+  if (session.telnet) session.telnet.end();
   if (session.logStream) session.logStream.end();
   sessions.delete(sessionId);
 
@@ -578,56 +578,56 @@ function connectSsh(session, profile, port) {
 
 function connectTelnet(session, profile, port) {
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: profile.host, port }, () => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    const telnet = new TelnetClient({ cols: session.cols, rows: session.rows });
+    session.telnet = telnet;
+
+    telnet.on('connect', () => {
       sendToWindow(session.window, 'session:status', {
         sessionId: session.sessionId,
         status: 'connected',
-        message: 'Conexion Telnet establecida'
+        message: 'Conexion Telnet establecida (texto plano)'
       });
-      resolve({ ok: true, sessionId: session.sessionId });
+      finish({ ok: true, sessionId: session.sessionId });
     });
-
-    session.socket = socket;
-    socket.setKeepAlive(true, 30000);
-    socket.on('data', (data) => {
-      const clean = stripTelnetNegotiation(data);
-      appendLog(session, clean);
+    telnet.on('data', (text) => {
+      appendLog(session, text);
       sendToWindow(session.window, 'session:data', {
         sessionId: session.sessionId,
-        data: clean
+        data: text
       });
     });
-    socket.on('error', (err) => {
+    telnet.on('error', (error) => {
       sendToWindow(session.window, 'session:status', {
         sessionId: session.sessionId,
         status: 'error',
-        message: err.message
+        message: error.message
       });
-      closeSession(session.sessionId, 'Error Telnet');
-      resolve({ ok: false, sessionId: session.sessionId, error: err.message });
+      closeSession(session.sessionId, error.message);
+      finish({ ok: false, sessionId: session.sessionId, error: error.message });
     });
-    socket.on('close', () => closeSession(session.sessionId));
-  });
-}
+    telnet.on('close', () => {
+      closeSession(session.sessionId);
+      finish({ ok: false, sessionId: session.sessionId, error: 'La conexion Telnet se cerro.' });
+    });
 
-function stripTelnetNegotiation(buffer) {
-  const output = [];
-  for (let index = 0; index < buffer.length; index += 1) {
-    const byte = buffer[index];
-    if (byte === 255) {
-      index += 2;
-      continue;
-    }
-    output.push(byte);
-  }
-  return Buffer.from(output).toString('utf8');
+    // Timeout de conexion: el mismo campo del perfil, acotado a 5-30 s.
+    const timeout = Math.min(Math.max(Number(profile.sshTimeout) || 15000, 5000), 30000);
+    telnet.connect({ host: profile.host, port, timeout });
+  });
 }
 
 ipcMain.handle('session:write', async (_event, { sessionId, data }) => {
   const session = sessions.get(sessionId);
   if (!session) return { ok: false, error: 'Sesion no encontrada' };
   if (session.stream) session.stream.write(data);
-  if (session.socket) session.socket.write(data);
+  if (session.telnet) session.telnet.write(data);
   return { ok: true };
 });
 
@@ -639,6 +639,7 @@ ipcMain.handle('session:resize', async (_event, { sessionId, cols, rows }) => {
   if (session.stream && typeof session.stream.setWindow === 'function') {
     session.stream.setWindow(rows, cols, 0, 0);
   }
+  if (session.telnet) session.telnet.resize(cols, rows);
   return { ok: true };
 });
 

@@ -98,6 +98,15 @@ El generador no incluye credenciales por defecto: el secret del usuario local es
 
 ## Solucion de problemas
 
+### Telnet
+
+Telnet viaja en texto plano: uselo solo en laboratorio o para equipos sin SSH. El cliente negocia ECHO, SGA, tipo de terminal y tamano de ventana (NAWS), y usa como timeout de conexion el campo `Timeout SSH ms` (entre 5 y 30 s).
+
+- "Conexion rechazada": el puerto no acepta Telnet; revise `transport input` en `line vty` o el puerto.
+- "Sin respuesta ... en N s": host apagado o filtrado por ACL/firewall.
+- "Host inalcanzable": revise IP, gateway o VLAN de gestion.
+- "El equipo cerro la conexion": `access-class` en `line vty`, limite de sesiones VTY o puerto ocupado.
+
 ### Error: Timed out while waiting for handshake
 
 Este error indica que la conexion TCP abre, pero la negociacion SSH no termina dentro del tiempo esperado.
