@@ -4,6 +4,7 @@
 const net = require('net');
 const { EventEmitter } = require('events');
 const { StringDecoder } = require('string_decoder');
+const { readableNetError } = require('./net-errors');
 
 const IAC = 255;
 const DONT = 254;
@@ -31,23 +32,7 @@ const STATE_SB = 3;
 const STATE_SB_IAC = 4;
 
 function readableTelnetError(error, host, port, timeoutMs) {
-  const target = `${host}:${port}`;
-  switch (error && error.code) {
-    case 'ECONNREFUSED':
-      return `Conexion rechazada en ${target}: el puerto no acepta Telnet (line vty con "transport input ssh" o puerto incorrecto).`;
-    case 'ETIMEDOUT':
-      return `Sin respuesta de ${target} en ${Math.round(timeoutMs / 1000)} s: host apagado, inalcanzable o filtrado por ACL/firewall.`;
-    case 'EHOSTUNREACH':
-    case 'ENETUNREACH':
-      return `Host ${target} inalcanzable: revise IP, gateway o VLAN de gestion.`;
-    case 'ENOTFOUND':
-    case 'EAI_AGAIN':
-      return `No se pudo resolver el nombre "${host}".`;
-    case 'ECONNRESET':
-      return `El equipo cerro la conexion (access-class en line vty, limite de sesiones o puerto ocupado).`;
-    default:
-      return error && error.message ? error.message : 'Error Telnet';
-  }
+  return readableNetError(error, { host, port, timeout: timeoutMs, protocol: 'telnet' });
 }
 
 class TelnetClient extends EventEmitter {

@@ -55,56 +55,91 @@
             </label>
           </div>
 
+          <!-- data-protocols: protocolos en los que se muestra cada campo -->
           <div class="grid-2">
             <label>
               Protocolo
               <select id="protocol">
                 <option value="ssh">SSH</option>
                 <option value="telnet">Telnet</option>
+                <option value="serial">Serial (consola)</option>
+                <option value="raw">TCP raw</option>
+                <option value="rlogin">Rlogin</option>
               </select>
             </label>
-            <label>
+            <label data-protocols="ssh telnet raw rlogin">
               Puerto
               <input id="port" value="22" inputmode="numeric" />
             </label>
           </div>
 
-          <label>
+          <label data-protocols="ssh telnet raw rlogin">
             Host / IP
             <input id="host" placeholder="192.168.10.2" autocomplete="off" />
           </label>
 
-          <div class="grid-2">
+          <div class="serial-row" data-protocols="serial">
+            <label>
+              Puerto serial
+              <select id="serialPath"></select>
+            </label>
+            <button id="refreshSerialBtn" class="icon-btn" type="button" title="Buscar puertos COM">&#8635;</button>
+          </div>
+
+          <div class="grid-2" data-protocols="serial">
+            <label>
+              Baudios
+              <select id="baudRate">
+                <option>9600</option>
+                <option>19200</option>
+                <option>38400</option>
+                <option>57600</option>
+                <option>115200</option>
+              </select>
+            </label>
+            <label>
+              Control de flujo
+              <select id="flowControl">
+                <option value="none">Ninguno</option>
+                <option value="rtscts">RTS/CTS</option>
+                <option value="xonxoff">XON/XOFF</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid-2" data-protocols="ssh rlogin">
             <label>
               Usuario
               <input id="username" placeholder="admin" autocomplete="username" />
             </label>
-            <label>
+            <label data-protocols="ssh">
               Contrasena
               <input id="password" type="password" autocomplete="current-password" />
             </label>
           </div>
 
-          <label>
+          <label data-protocols="ssh">
             Enable secret (respaldo)
             <input id="profileEnableSecret" type="password" placeholder="Solo si el usuario entra en modo >" autocomplete="off" />
           </label>
 
-          <label class="check-row" title="Se cifra con el almacen del sistema (DPAPI en Windows, Keychain en macOS).">
+          <label class="check-row" data-protocols="ssh" title="Se cifra con el almacen del sistema (DPAPI en Windows, Keychain en macOS).">
             <input id="savePassword" type="checkbox" />
             <span>Recordar contrasenas (cifradas)</span>
           </label>
 
-          <div class="grid-2">
+          <div class="grid-2" data-protocols="ssh telnet raw rlogin">
             <label>
-              Timeout SSH ms
+              <span id="timeoutLabel">Timeout SSH ms</span>
               <input id="sshTimeout" value="45000" inputmode="numeric" />
             </label>
-            <label class="check-row inline-check">
+            <label class="check-row inline-check" data-protocols="ssh">
               <input id="legacyCiscoSsh" type="checkbox" />
               <span>Cisco legacy SSH</span>
             </label>
           </div>
+
+          <p id="protocolNote" class="panel-note protocol-note"></p>
 
           <label class="check-row">
             <input id="enableLog" type="checkbox" checked />
@@ -157,6 +192,7 @@
             <div class="button-row slim">
               <button id="clearTerminalBtn" type="button">Limpiar</button>
               <span id="rollbackBadge" class="badge connecting" hidden></span>
+              <button id="breakBtn" type="button" hidden title="Envia Break por la consola serial (routers: interrumpe el arranque para entrar a ROMMON)">Break</button>
               <button id="backupActiveBtn" type="button">Respaldar</button>
               <button id="sendGeneratedBtn" type="button" disabled>Enviar Config</button>
               <button id="confirmChangesBtn" type="button" disabled title="reload cancel + write memory">Confirmar y guardar</button>
@@ -332,6 +368,13 @@ Gi1/0/13-18,30</textarea>
                 </label>
               </div>
 
+              <div class="grid-3">
+                <label>
+                  VLAN nativa troncales
+                  <input id="nativeVlan" value="99" inputmode="numeric" placeholder="Vacio = no modificar" />
+                </label>
+              </div>
+
               <div class="option-grid">
                 <label class="check-row">
                   <input id="enableSsh" type="checkbox" checked />
@@ -399,6 +442,7 @@ Gi1/0/13-18,30</textarea>
     </main>
 
     <script src="../../node_modules/@xterm/xterm/lib/xterm.js"></script>
+    <script src="../../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
     <script src="./cisco-runner.js"></script>
     <script src="./terminal-sessions.js"></script>
     <script src="./renderer.js"></script>

@@ -15,7 +15,9 @@
     "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "serialport": "^13.0.0",
     "ssh2": "^1.16.0"
   },
   "devDependencies": {
@@ -32,6 +34,10 @@
       "src/**/*",
       "package.json",
       "node_modules/**/*"
+    ],
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/@serialport/bindings-cpp/**"
     ],
     "win": {
       "signAndEditExecutable": false,

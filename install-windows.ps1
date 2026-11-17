@@ -5,6 +5,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Version = (Get-Content -LiteralPath (Join-Path $ProjectRoot "package.json") -Raw | ConvertFrom-Json).version
 $SourceDir = Join-Path $ProjectRoot "dist\win-unpacked"
 $Executable = Join-Path $SourceDir "Cisco Switch Console.exe"
 
@@ -42,11 +43,11 @@ $UninstallShortcut.Save()
 $UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CiscoSwitchConsole"
 New-Item -Path $UninstallKey -Force | Out-Null
 New-ItemProperty -Path $UninstallKey -Name "DisplayName" -Value "Cisco Switch Console" -PropertyType String -Force | Out-Null
-New-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value "0.1.0" -PropertyType String -Force | Out-Null
+New-ItemProperty -Path $UninstallKey -Name "DisplayVersion" -Value $Version -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $UninstallKey -Name "Publisher" -Value "JCV" -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $UninstallKey -Name "InstallLocation" -Value $InstallDir -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value (Join-Path $InstallDir "Cisco Switch Console.exe") -PropertyType String -Force | Out-Null
 New-ItemProperty -Path $UninstallKey -Name "UninstallString" -Value "powershell.exe -ExecutionPolicy Bypass -File `"$ProjectRoot\uninstall-windows.ps1`"" -PropertyType String -Force | Out-Null
 
-Write-Host "Cisco Switch Console instalado en: $InstallDir"
+Write-Host "Cisco Switch Console $Version instalado en: $InstallDir"
 Write-Host "Acceso directo creado en el menu Inicio."

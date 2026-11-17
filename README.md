@@ -1,10 +1,10 @@
 # Cisco Switch Console
 
-Aplicacion de escritorio tipo PuTTY para administrar switches Cisco IOS por SSH o Telnet.
+Aplicacion de escritorio tipo PuTTY para administrar switches Cisco IOS por SSH, Telnet, consola serial, TCP raw o Rlogin.
 
 ## Alcance inicial
 
-- Conexion interactiva SSH y Telnet.
+- Conexion interactiva por SSH, Telnet, consola serial (con Break), TCP raw y Rlogin.
 - Terminal integrada para ejecutar comandos en switches Cisco.
 - Terminales multiples: 5 al iniciar y hasta 10 con el boton `+`; cambio rapido con `Alt+1`..`Alt+9` y `Alt+0`.
 - Perfiles por equipo, modelo, IP, puerto y credenciales.
@@ -23,6 +23,11 @@ Aplicacion de escritorio tipo PuTTY para administrar switches Cisco IOS por SSH 
 
 - Node.js 20 o superior.
 - Acceso de red hacia los switches por SSH o Telnet.
+- Para consola serial: driver del adaptador USB-serial (FTDI, Prolific, Silicon Labs CP210x) o el driver "Cisco USB Console" para el puerto mini-USB/USB-C de consola.
+
+Despues de actualizar el proyecto ejecute `npm install`: instala `serialport` (modulo nativo con binarios precompilados, sin compilar nada) y `@xterm/addon-fit`.
+
+El build usa `"npmRebuild": false`: `serialport` trae binarios N-API precompilados (Windows, macOS y Linux) que funcionan en Electron sin recompilar, asi que no se necesita Visual Studio ni Xcode.
 
 ## Uso en desarrollo
 
@@ -77,6 +82,18 @@ El archivo `.dmg` queda en `dist`. Ver detalles en `MAC-INSTALL.md`.
 
 El generador no incluye credenciales por defecto: el secret del usuario local es obligatorio y el enable secret solo se modifica si se completa. En Catalyst 9200/9300 se usa `algorithm-type scrypt`.
 
+## Protocolos
+
+| Protocolo | Uso | Notas |
+|---|---|---|
+| SSH | Administracion normal | Unico protocolo cifrado; respaldo automatico solo por SSH. |
+| Telnet | Equipos sin SSH o laboratorio | Texto plano. Negocia ECHO, SGA, tipo de terminal y tamano de ventana. |
+| Serial | Cable de consola | 9600 8N1 sin control de flujo por defecto (Cisco). Boton **Break** (pide confirmacion): en routers interrumpe el arranque y entra a ROMMON; los switches Catalyst usan el boton MODE para la recuperacion. |
+| TCP raw | Servidores de consolas (Opengear, Moxa, Lantronix) | Bytes sin negociacion; indique el puerto TCP del puerto de consola. |
+| Rlogin | Equipos heredados | Texto plano; casi ningun IOS/IOS-XE lo acepta como servidor. Usa puerto de origen 512-1023 (en macOS/Linux sin root usa uno efimero y avisa). |
+
+"Enviar Config" (con rollback) funciona sobre cualquier protocolo; con consola serial sirve para equipos sin IP de gestion.
+
 ## Respaldo automatico
 
 "Respaldar" abre una sola sesion SSH y:
@@ -97,6 +114,12 @@ El generador no incluye credenciales por defecto: el secret del usuario local es
 - Validar las plantillas antes de aplicar cambios en produccion.
 
 ## Solucion de problemas
+
+### Consola serial
+
+- "Sin puertos COM detectados": instale el driver del adaptador y use el boton de refrescar junto al selector.
+- "El puerto COMx esta en uso": cierre PuTTY u otra terminal que tenga abierto el puerto.
+- Pantalla vacia al conectar: presione Enter; si aparecen caracteres extranos, revise los baudios (9600 en Cisco).
 
 ### Telnet
 

@@ -18,8 +18,11 @@
       maxSlots = 10,
       terminalOptions = {},
       onChange = () => {},
-      tabFlags = () => ({})
+      tabFlags = () => ({}),
+      estimateSize = () => ({ cols: 100, rows: 32 })
     } = options;
+    // @xterm/addon-fit mide la fuente real; si no esta instalado se usa la estimacion.
+    const FitAddonClass = root.FitAddon && root.FitAddon.FitAddon;
 
     const slots = [];
     const bySession = new Map();
@@ -41,6 +44,8 @@
       const term = new root.Terminal({ ...terminalOptions });
       // xterm mide la fuente al abrir: el panel debe estar visible en ese momento (render() lo oculta despues).
       pane.classList.add('active');
+      const fit = FitAddonClass ? new FitAddonClass() : null;
+      if (fit) term.loadAddon(fit);
       term.open(pane);
       term.resize(lastSize.cols, lastSize.rows);
 
@@ -49,6 +54,7 @@
         number: index + 1,
         pane,
         term,
+        fit,
         sessionId: null,
         connected: false,
         status: 'idle',
@@ -117,6 +123,7 @@
       activeIndex = index;
       const slot = slots[index];
       notify(slot);
+      fitActive();
       slot.term.refresh(0, slot.term.rows - 1);
       slot.term.focus();
     }
@@ -144,11 +151,16 @@
       bySession.set(sessionId, slot);
 
       slot.term.writeln('');
-      slot.term.writeln(`--- Conectando a ${profile.host}:${profile.port} por ${profile.protocol.toUpperCase()} ---`);
-      if (profile.protocol === 'telnet') {
-        slot.term.writeln('\x1b[33mAviso: Telnet viaja en texto plano, incluidas las credenciales. Prefiera SSH.\x1b[0m');
+      if (profile.protocol === 'serial') {
+        slot.term.writeln(`--- Abriendo ${profile.serialPath || profile.host} a ${profile.baudRate || 9600} baudios ---`);
+        slot.term.writeln('Presione Enter para ver el prompt.');
+      } else {
+        slot.term.writeln(`--- Conectando a ${profile.host}:${profile.port} por ${profile.protocol.toUpperCase()} ---`);
       }
-      setStatus(slot, 'connecting', `Conectando a ${profile.host}`);
+      if (['telnet', 'raw', 'rlogin'].includes(profile.protocol)) {
+        slot.term.writeln(`\x1b[33mAviso: ${profile.protocol.toUpperCase()} viaja en texto plano, incluidas las credenciales. Prefiera SSH.\x1b[0m`);
+      }
+      setStatus(slot, 'connecting', profile.protocol === 'serial' ? `Abriendo ${profile.host}` : `Conectando a ${profile.host}`);
 
       const result = await api.connect({ ...profile, sessionId, cols: lastSize.cols, rows: lastSize.rows });
       if (slot.sessionId !== sessionId) return result;
@@ -181,6 +193,34 @@
         slot.term.resize(size.cols, size.rows);
         if (slot.sessionId) api.resize(slot.sessionId, size.cols, size.rows);
       });
+    }
+
+    // Mide la terminal visible y aplica el mismo tamano a todas (comparten el panel).
+    function fitActive() {
+      const slot = slots[activeIndex];
+      let size = null;
+      if (slot && slot.fit && slot.pane.offsetParent !== null) {
+        const proposed = slot.fit.proposeDimensions();
+        if (proposed && proposed.cols > 0 && proposed.rows > 0) size = proposed;
+      }
+      if (!size) size = estimateSize();
+      if (!size || !size.cols || !size.rows) return;
+      const cols = Math.max(40, size.cols);
+      const rows = Math.max(10, size.rows);
+      if (cols === lastSize.cols && rows === lastSize.rows) return;
+      resizeAll({ cols, rows });
+    }
+
+    if (typeof root.ResizeObserver === 'function') {
+      let pending = false;
+      new root.ResizeObserver(() => {
+        if (pending) return;
+        pending = true;
+        root.requestAnimationFrame(() => {
+          pending = false;
+          fitActive();
+        });
+      }).observe(container);
     }
 
     function findFree() {
@@ -222,6 +262,8 @@
       disconnect,
       write,
       resizeAll,
+      fitActive,
+      size: () => ({ ...lastSize }),
       findFree
     };
   }

@@ -5,6 +5,22 @@ const os = require('os');
 const { Client } = require('ssh2');
 const { createSanitizedLog, renderLine } = require('./log-sanitizer');
 const { TelnetClient } = require('./telnet-client');
+const { RawClient, RloginClient } = require('./net-clients');
+const { SerialClient, listSerialPorts } = require('./serial-client');
+
+const PROTOCOLS = ['ssh', 'telnet', 'raw', 'rlogin', 'serial'];
+const DEFAULT_PORTS = { ssh: 22, telnet: 23, rlogin: 513, raw: 0, serial: 0 };
+const FLOW_CONTROLS = ['none', 'rtscts', 'xonxoff'];
+
+function protocolOf(profile) {
+  return PROTOCOLS.includes(profile.protocol) ? profile.protocol : 'ssh';
+}
+
+// Texto del destino para mensajes y logs: "host:puerto" o "COM3 @ 9600".
+function targetLabel(profile, protocol, port) {
+  if (protocol === 'serial') return `${profile.serialPath || profile.host} @ ${Number(profile.baudRate) || 9600}`;
+  return `${profile.host}:${port}`;
+}
 const { create: createRunner } = require('./renderer/cisco-runner');
 
 const sessions = new Map();
@@ -110,15 +126,21 @@ function writeInventory(inventory) {
 }
 
 function normalizeProfile(profile) {
-  const protocol = profile.protocol === 'telnet' ? 'telnet' : 'ssh';
+  const protocol = protocolOf(profile);
+  const serialPath = String(profile.serialPath || '').trim();
+  // En serial el "host" es el puerto COM: identifica el perfil en inventario y pestanas.
+  const host = protocol === 'serial' ? (serialPath || String(profile.host || '').trim()) : String(profile.host || '').trim();
   return {
     id: profile.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: String(profile.name || profile.host || 'Switch').trim(),
+    name: String(profile.name || host || 'Switch').trim(),
     model: String(profile.model || 'Catalyst 2960').trim(),
     site: String(profile.site || '').trim(),
     protocol,
-    host: String(profile.host || '').trim(),
-    port: Number(profile.port || (protocol === 'ssh' ? 22 : 23)),
+    host,
+    port: Number(profile.port || DEFAULT_PORTS[protocol]) || 0,
+    serialPath: protocol === 'serial' ? host : serialPath,
+    baudRate: Number(profile.baudRate) || 9600,
+    flowControl: FLOW_CONTROLS.includes(profile.flowControl) ? profile.flowControl : 'none',
     username: String(profile.username || '').trim(),
     sshTimeout: Number(profile.sshTimeout || 45000),
     legacyCiscoSsh: profile.legacyCiscoSsh === true,
@@ -191,7 +213,7 @@ function parseImportedInventory(filePath) {
     .filter(Boolean)
     .filter((line, index) => index > 0 || !line.toLowerCase().startsWith('name,'))
     .map((line) => {
-      const [name, host, model, site, protocol, port, username, sshTimeout, legacyCiscoSsh, notes] = line
+      const [name, host, model, site, protocol, port, username, sshTimeout, legacyCiscoSsh, notes, serialPath, baudRate, flowControl] = line
         .split(',')
         .map((part) => part.trim());
       return normalizeProfile({
@@ -204,7 +226,10 @@ function parseImportedInventory(filePath) {
         username,
         sshTimeout,
         legacyCiscoSsh: /^(true|si|yes|1)$/i.test(legacyCiscoSsh || ''),
-        notes
+        notes,
+        serialPath,
+        baudRate,
+        flowControl
       });
     })
     .map((profile) => ({ ...profile, password: '' }));
@@ -225,9 +250,12 @@ function profileToCsv(profiles) {
     profile.username,
     profile.sshTimeout,
     profile.legacyCiscoSsh ? 'true' : 'false',
-    profile.notes
+    profile.notes,
+    profile.serialPath,
+    profile.protocol === 'serial' ? profile.baudRate : '',
+    profile.protocol === 'serial' ? profile.flowControl : ''
   ].map(escape).join(','));
-  return ['name,host,model,site,protocol,port,username,sshTimeout,legacyCiscoSsh,notes', ...rows].join('\n');
+  return ['name,host,model,site,protocol,port,username,sshTimeout,legacyCiscoSsh,notes,serialPath,baudRate,flowControl', ...rows].join('\n');
 }
 
 function createWindow() {
@@ -264,7 +292,7 @@ function closeSession(sessionId, reason = 'Sesion finalizada') {
 
   if (session.stream) session.stream.end();
   if (session.conn) session.conn.end();
-  if (session.telnet) session.telnet.end();
+  if (session.client) session.client.end();
   if (session.logStream) session.logStream.end();
   sessions.delete(sessionId);
 
@@ -284,7 +312,7 @@ function openLogFile(profile, protocol, port) {
   fs.mkdirSync(logDir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const file = fs.createWriteStream(path.join(logDir, `${safeName}_${stamp}.log`), { flags: 'a' });
-  file.write(`# Cisco Switch Console - ${profile.host}:${port} ${protocol.toUpperCase()} - ${new Date().toISOString()}${os.EOL}`);
+  file.write(`# Cisco Switch Console - ${targetLabel(profile, protocol, port)} ${protocol.toUpperCase()} - ${new Date().toISOString()}${os.EOL}`);
   file.write(`# Credenciales enmascaradas como <oculto>.${os.EOL}`);
   // Solo se registra lo que devuelve el equipo (incluye el eco de lo tecleado);
   // lo que se escribe no se registra para no capturar contrasenas sin eco.
@@ -469,8 +497,8 @@ ipcMain.handle('session:connect', async (event, profile) => {
   const sessionId = requestedId && !sessions.has(requestedId)
     ? requestedId
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const protocol = profile.protocol === 'telnet' ? 'telnet' : 'ssh';
-  const port = Number(profile.port || (protocol === 'ssh' ? 22 : 23));
+  const protocol = protocolOf(profile);
+  const port = Number(profile.port || DEFAULT_PORTS[protocol]) || 0;
   const logStream = profile.enableLog ? openLogFile(profile, protocol, port) : null;
 
   const session = {
@@ -486,14 +514,19 @@ ipcMain.handle('session:connect', async (event, profile) => {
   sendToWindow(window, 'session:status', {
     sessionId,
     status: 'connecting',
-    message: `Conectando a ${profile.host}:${port} por ${protocol.toUpperCase()}`
+    message: protocol === 'serial'
+      ? `Abriendo ${targetLabel(profile, protocol, port)}`
+      : `Conectando a ${targetLabel(profile, protocol, port)} por ${protocol.toUpperCase()}`
   });
 
   if (protocol === 'ssh') {
     return connectSsh(session, { ...profile, password: resolvePassword(profile) }, port);
   }
-
-  return connectTelnet(session, profile, port);
+  if (protocol !== 'serial' && !port) {
+    closeSession(sessionId, 'No se pudo conectar: indique el puerto TCP.');
+    return { ok: false, sessionId, error: 'Indique el puerto TCP.' };
+  }
+  return connectStreamClient(session, protocol, profile, port);
 });
 
 function connectSsh(session, profile, port) {
@@ -576,7 +609,45 @@ function connectSsh(session, profile, port) {
   });
 }
 
-function connectTelnet(session, profile, port) {
+// Telnet, TCP raw, Rlogin y serial comparten interfaz: connect/data/error/close/notice + write/resize/end.
+function createStreamClient(protocol, session, profile, port) {
+  const host = profile.host;
+  const timeout = Math.min(Math.max(Number(profile.sshTimeout) || 15000, 5000), 30000);
+  switch (protocol) {
+    case 'telnet':
+      return {
+        client: new TelnetClient({ cols: session.cols, rows: session.rows }),
+        open: (client) => client.connect({ host, port, timeout }),
+        label: 'Conexion Telnet establecida (texto plano)'
+      };
+    case 'raw':
+      return {
+        client: new RawClient(),
+        open: (client) => client.connect({ host, port, timeout }),
+        label: 'Conexion TCP raw establecida (texto plano)'
+      };
+    case 'rlogin':
+      return {
+        client: new RloginClient({ cols: session.cols, rows: session.rows }),
+        open: (client) => client.connect({ host, port, timeout, remoteUser: profile.username || '' }),
+        label: 'Conexion Rlogin establecida (texto plano)'
+      };
+    case 'serial':
+      return {
+        client: new SerialClient(),
+        open: (client) => client.connect({
+          path: profile.serialPath || profile.host,
+          baudRate: Number(profile.baudRate) || 9600,
+          flowControl: profile.flowControl || 'none'
+        }),
+        label: `Consola serial abierta: ${targetLabel(profile, protocol, port)}`
+      };
+    default:
+      throw new Error(`Protocolo no soportado: ${protocol}`);
+  }
+}
+
+function connectStreamClient(session, protocol, profile, port) {
   return new Promise((resolve) => {
     let settled = false;
     const finish = (result) => {
@@ -585,25 +656,29 @@ function connectTelnet(session, profile, port) {
       resolve(result);
     };
 
-    const telnet = new TelnetClient({ cols: session.cols, rows: session.rows });
-    session.telnet = telnet;
+    const { client, open, label } = createStreamClient(protocol, session, profile, port);
+    session.client = client;
 
-    telnet.on('connect', () => {
+    client.on('connect', () => {
       sendToWindow(session.window, 'session:status', {
         sessionId: session.sessionId,
         status: 'connected',
-        message: 'Conexion Telnet establecida (texto plano)'
+        message: label
       });
       finish({ ok: true, sessionId: session.sessionId });
     });
-    telnet.on('data', (text) => {
+    client.on('data', (text) => {
       appendLog(session, text);
+      sendToWindow(session.window, 'session:data', { sessionId: session.sessionId, data: text });
+    });
+    // Avisos del cliente: se muestran en la terminal, no van al log.
+    client.on('notice', (notice) => {
       sendToWindow(session.window, 'session:data', {
         sessionId: session.sessionId,
-        data: text
+        data: `\r\n\x1b[33mAviso: ${notice}\x1b[0m\r\n`
       });
     });
-    telnet.on('error', (error) => {
+    client.on('error', (error) => {
       sendToWindow(session.window, 'session:status', {
         sessionId: session.sessionId,
         status: 'error',
@@ -612,14 +687,12 @@ function connectTelnet(session, profile, port) {
       closeSession(session.sessionId, error.message);
       finish({ ok: false, sessionId: session.sessionId, error: error.message });
     });
-    telnet.on('close', () => {
+    client.on('close', () => {
       closeSession(session.sessionId);
-      finish({ ok: false, sessionId: session.sessionId, error: 'La conexion Telnet se cerro.' });
+      finish({ ok: false, sessionId: session.sessionId, error: 'La conexion se cerro.' });
     });
 
-    // Timeout de conexion: el mismo campo del perfil, acotado a 5-30 s.
-    const timeout = Math.min(Math.max(Number(profile.sshTimeout) || 15000, 5000), 30000);
-    telnet.connect({ host: profile.host, port, timeout });
+    open(client);
   });
 }
 
@@ -627,7 +700,7 @@ ipcMain.handle('session:write', async (_event, { sessionId, data }) => {
   const session = sessions.get(sessionId);
   if (!session) return { ok: false, error: 'Sesion no encontrada' };
   if (session.stream) session.stream.write(data);
-  if (session.telnet) session.telnet.write(data);
+  if (session.client) session.client.write(data);
   return { ok: true };
 });
 
@@ -639,8 +712,29 @@ ipcMain.handle('session:resize', async (_event, { sessionId, cols, rows }) => {
   if (session.stream && typeof session.stream.setWindow === 'function') {
     session.stream.setWindow(rows, cols, 0, 0);
   }
-  if (session.telnet) session.telnet.resize(cols, rows);
+  if (session.client) session.client.resize(cols, rows);
   return { ok: true };
+});
+
+ipcMain.handle('session:break', async (_event, sessionId) => {
+  const session = sessions.get(sessionId);
+  if (!session || !session.client || typeof session.client.sendBreak !== 'function') {
+    return { ok: false, error: 'Break solo esta disponible en consola serial.' };
+  }
+  try {
+    await session.client.sendBreak();
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('serial:list', async () => {
+  try {
+    return await listSerialPorts();
+  } catch (error) {
+    return { ok: false, error: error.message, ports: [] };
+  }
 });
 
 ipcMain.handle('session:disconnect', async (_event, sessionId) => {
@@ -747,8 +841,8 @@ ipcMain.handle('backup:profile', async (event, profile) => {
   const window = BrowserWindow.fromWebContents(event.sender);
   const progress = (message) => sendToWindow(window, 'backup:progress', { message });
   const normalized = { ...normalizeProfile(profile), password: resolvePassword(profile) };
-  if (normalized.protocol === 'telnet') {
-    return { ok: false, error: 'El respaldo automatico usa SSH. Para Telnet ejecute los comandos manualmente en la terminal.' };
+  if (normalized.protocol !== 'ssh') {
+    return { ok: false, error: 'El respaldo automatico usa SSH. Con otros protocolos ejecute los comandos manualmente en la terminal.' };
   }
 
   try {

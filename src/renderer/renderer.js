@@ -17,6 +17,13 @@ const els = {
   username: document.querySelector('#username'),
   password: document.querySelector('#password'),
   savePassword: document.querySelector('#savePassword'),
+  serialPath: document.querySelector('#serialPath'),
+  baudRate: document.querySelector('#baudRate'),
+  flowControl: document.querySelector('#flowControl'),
+  refreshSerialBtn: document.querySelector('#refreshSerialBtn'),
+  breakBtn: document.querySelector('#breakBtn'),
+  protocolNote: document.querySelector('#protocolNote'),
+  timeoutLabel: document.querySelector('#timeoutLabel'),
   profileEnableSecret: document.querySelector('#profileEnableSecret'),
   sshTimeout: document.querySelector('#sshTimeout'),
   legacyCiscoSsh: document.querySelector('#legacyCiscoSsh'),
@@ -54,6 +61,16 @@ const els = {
   rollbackNote: document.querySelector('#rollbackNote')
 };
 
+const DEFAULT_PORTS = { ssh: '22', telnet: '23', rlogin: '513', raw: '', serial: '' };
+const PLAINTEXT_PROTOCOLS = ['telnet', 'raw', 'rlogin'];
+const PROTOCOL_NOTES = {
+  ssh: '',
+  telnet: 'Telnet viaja en texto plano: uselo solo en laboratorio o equipos sin SSH. El login se hace en la terminal.',
+  serial: 'Cable de consola Cisco: 9600 baudios, 8N1, sin control de flujo. Break: en routers interrumpe el arranque (ROMMON); los switches Catalyst usan el boton MODE.',
+  raw: 'TCP raw: para puertos de consola de servidores de consolas (Opengear, Moxa, Lantronix). Sin cifrado.',
+  rlogin: 'Rlogin viaja en texto plano y casi ningun IOS/IOS-XE lo acepta como servidor. La clave se pide en la terminal.'
+};
+
 // Rollbacks programados por host (sobreviven a la desconexion de la terminal).
 const rollbacks = new Map();
 
@@ -77,6 +94,7 @@ const sessions = window.TerminalSessions.create({
     }
   },
   tabFlags: (slot) => ({ rollback: Boolean(slot.host && rollbacks.has(slot.host)), running: slot.scriptRunning }),
+  estimateSize: () => terminalSize(),
   onChange: () => renderActiveSession()
 });
 
@@ -97,42 +115,49 @@ const modelTemplates = {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n99, Nativa',
     accessPorts: 'Gi0/1-12,20\nGi0/13-18,30',
     trunkPorts: 'Gi0/24,10,20,30,99',
+    nativeVlan: '99',
     note: 'Plantilla capa 2 para acceso clasico.'
   },
   'Catalyst 2960-X': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n40, Impresoras\n99, Nativa',
     accessPorts: 'Gi1/0/1-24,20\nGi1/0/25-36,30',
     trunkPorts: 'Gi1/0/48,10,20,30,40,99',
+    nativeVlan: '99',
     note: 'Plantilla capa 2 para acceso con uplink Gigabit.'
   },
   'Catalyst 3560': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n50, Servidores\n99, Nativa',
     accessPorts: 'Gi0/1-20,20\nGi0/21-22,30',
     trunkPorts: 'Gi0/24,10,20,30,50,99',
+    nativeVlan: '99',
     note: 'Plantilla con opcion de routing inter-VLAN.'
   },
   'Catalyst 3750': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n50, Servidores\n99, Nativa',
     accessPorts: 'Gi1/0/1-24,20\nGi1/0/25-36,30',
     trunkPorts: 'Gi1/0/48,10,20,30,50,99',
+    nativeVlan: '99',
     note: 'Plantilla para stack de acceso/distribucion.'
   },
   'Catalyst 9200': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n40, CCTV\n99, Nativa',
     accessPorts: 'Gi1/0/1-24,20\nGi1/0/25-36,30\nGi1/0/37-44,40',
     trunkPorts: 'Gi1/1/1,10,20,30,40,99',
+    nativeVlan: '99',
     note: 'Plantilla IOS XE para acceso empresarial.'
   },
   'Catalyst 9300': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n50, Servidores\n60, WiFi\n99, Nativa',
     accessPorts: 'Gi1/0/1-24,20\nGi1/0/25-36,30\nGi1/0/37-44,60',
     trunkPorts: 'Te1/1/1,10,20,30,50,60,99',
+    nativeVlan: '99',
     note: 'Plantilla IOS XE para core/acceso de mayor capacidad.'
   },
   'Small Business CBS': {
     vlans: '10, Gestion\n20, Usuarios\n30, Telefonia\n99, Nativa',
     accessPorts: 'Gi1-12,20\nGi13-18,30',
     trunkPorts: 'Gi24,10,20,30,99',
+    nativeVlan: '99',
     note: 'Plantilla base; validar sintaxis segun firmware CBS.'
   }
 };
@@ -147,7 +172,7 @@ function terminalSize() {
 }
 
 function resizeTerminal() {
-  sessions.resizeAll(terminalSize());
+  sessions.fitActive();
 }
 
 window.addEventListener('resize', resizeTerminal);
@@ -177,7 +202,6 @@ function slotLabel(slot) {
 
 async function loadInventory() {
   state.inventory = await window.switchConsole.loadInventory();
-renderActiveSession();
   renderInventory();
 }
 
@@ -230,7 +254,9 @@ function renderInventory() {
         <td>${escapeHtml(profile.host)}</td>
         <td>${escapeHtml(profile.model)}</td>
         <td class="muted">${escapeHtml(profile.site)}</td>
-        <td>${escapeHtml((profile.protocol || 'ssh').toUpperCase())}:${escapeHtml(profile.port)}</td>
+        <td>${profile.protocol === 'serial'
+          ? `SERIAL ${escapeHtml(profile.baudRate || 9600)}`
+          : `${escapeHtml((profile.protocol || 'ssh').toUpperCase())}:${escapeHtml(profile.port)}`}</td>
         <td class="muted">${[profile.hasPassword ? 'Cifrada' : '', profile.hasEnableSecret ? 'enable' : ''].filter(Boolean).join(' + ') || '-'}</td>
         <td><button type="button" data-load-profile="${escapeHtml(profile.id)}">Cargar</button></td>
       </tr>
@@ -256,8 +282,12 @@ function applyProfile(profileId) {
   els.connectionModel.value = profile.model || 'Catalyst 2960';
   els.site.value = profile.site || '';
   els.protocol.value = profile.protocol || 'ssh';
-  els.port.value = profile.port || (els.protocol.value === 'ssh' ? 22 : 23);
-  els.host.value = profile.host || '';
+  els.port.value = profile.port || DEFAULT_PORTS[els.protocol.value] || '';
+  els.host.value = profile.protocol === 'serial' ? '' : profile.host || '';
+  els.baudRate.value = String(profile.baudRate || 9600);
+  els.flowControl.value = profile.flowControl || 'none';
+  applyProtocolUi();
+  if (profile.protocol === 'serial') refreshSerialPorts(profile.serialPath || profile.host);
   els.username.value = profile.username || '';
   setPasswordField(profile);
   els.sshTimeout.value = profile.sshTimeout || 45000;
@@ -307,9 +337,59 @@ async function deleteCurrentProfile() {
   }
 }
 
+// Muestra solo los campos que usa el protocolo elegido (atributo data-protocols).
+function applyProtocolUi() {
+  const protocol = els.protocol.value;
+  document.querySelectorAll('[data-protocols]').forEach((element) => {
+    element.hidden = !element.dataset.protocols.split(' ').includes(protocol);
+  });
+  // Sin campo Puerto (serial), el selector de protocolo ocupa toda la fila.
+  els.protocol.closest('.grid-2').classList.toggle('single', protocol === 'serial');
+  els.timeoutLabel.textContent = protocol === 'ssh' ? 'Timeout SSH ms' : 'Timeout conexion ms';
+  els.protocolNote.textContent = PROTOCOL_NOTES[protocol] || '';
+}
+
+async function refreshSerialPorts(selected = els.serialPath.value) {
+  els.refreshSerialBtn.disabled = true;
+  try {
+    const result = await window.switchConsole.listSerialPorts();
+    const ports = result.ports || [];
+    els.serialPath.innerHTML = '';
+    ports.forEach((port) => {
+      const option = document.createElement('option');
+      option.value = port.path;
+      option.textContent = port.description ? `${port.path} - ${port.description}` : port.path;
+      els.serialPath.appendChild(option);
+    });
+    // Un puerto guardado que hoy no esta conectado se mantiene visible.
+    if (selected && !ports.some((port) => port.path === selected)) {
+      const option = document.createElement('option');
+      option.value = selected;
+      option.textContent = `${selected} (no detectado)`;
+      els.serialPath.appendChild(option);
+    }
+    if (!els.serialPath.options.length) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = result.ok ? 'Sin puertos COM detectados' : 'Modulo serial no disponible';
+      els.serialPath.appendChild(option);
+    }
+    if (selected) els.serialPath.value = selected;
+    if (!result.ok) showMessage(result.error);
+  } finally {
+    els.refreshSerialBtn.disabled = false;
+  }
+}
+
 els.protocol.addEventListener('change', () => {
-  els.port.value = els.protocol.value === 'ssh' ? '22' : '23';
+  const protocol = els.protocol.value;
+  const current = els.port.value.trim();
+  if (!current || Object.values(DEFAULT_PORTS).includes(current)) els.port.value = DEFAULT_PORTS[protocol];
+  applyProtocolUi();
+  if (protocol === 'serial') refreshSerialPorts();
 });
+
+els.refreshSerialBtn.addEventListener('click', () => refreshSerialPorts());
 
 els.savedProfiles.addEventListener('change', () => {
   if (!els.savedProfiles.value) {
@@ -375,19 +455,25 @@ function renderActiveSession() {
   els.sessionSubtitle.textContent = slot.message;
   setStatusBadge(slot.status);
   els.disconnectBtn.disabled = !slot.sessionId;
+  els.breakBtn.hidden = !(slot.protocol === 'serial' && slot.connected);
   renderRollback();
 }
 
 function connectionProfile() {
-  const { cols, rows } = terminalSize();
+  const { cols, rows } = sessions.size();
+  const protocol = els.protocol.value;
+  const serialPath = els.serialPath.value;
   return {
     id: state.currentProfileId,
     name: els.profileName.value.trim(),
     model: els.connectionModel.value,
     site: els.site.value.trim(),
-    protocol: els.protocol.value,
-    port: Number(els.port.value),
-    host: els.host.value.trim(),
+    protocol,
+    port: protocol === 'serial' ? 0 : Number(els.port.value),
+    host: protocol === 'serial' ? serialPath : els.host.value.trim(),
+    serialPath: protocol === 'serial' ? serialPath : '',
+    baudRate: Number(els.baudRate.value) || 9600,
+    flowControl: els.flowControl.value,
     username: els.username.value.trim(),
     password: els.password.value,
     savePassword: els.savePassword.checked,
@@ -403,7 +489,11 @@ function connectionProfile() {
 els.connectBtn.addEventListener('click', async () => {
   const profile = connectionProfile();
   if (!profile.host) {
-    showMessage('Ingrese la IP o nombre del switch.');
+    showMessage(profile.protocol === 'serial' ? 'Seleccione un puerto serial (COM).' : 'Ingrese la IP o nombre del switch.');
+    return;
+  }
+  if (profile.protocol !== 'serial' && !profile.port) {
+    showMessage('Indique el puerto TCP.');
     return;
   }
 
@@ -489,9 +579,9 @@ async function backupCurrentProfile() {
     els.backupResult.value = 'Ingrese o cargue un perfil con IP/host antes de respaldar.';
     return;
   }
-  if (profile.protocol === 'telnet') {
+  if (profile.protocol !== 'ssh') {
     setBackupStatus('error', 'Solo SSH');
-    els.backupResult.value = 'El respaldo automatico usa SSH. Para Telnet ejecute los comandos manualmente en Terminal.';
+    els.backupResult.value = 'El respaldo automatico usa SSH. Con otros protocolos ejecute los comandos manualmente en Terminal.';
     return;
   }
 
@@ -579,6 +669,21 @@ document.querySelectorAll('.macro').forEach((button) => {
 });
 
 els.clearTerminalBtn.addEventListener('click', () => sessions.active().term.clear());
+
+els.breakBtn.addEventListener('click', async () => {
+  const slot = sessions.active();
+  if (!slot.sessionId || slot.protocol !== 'serial') return;
+  const proceed = window.confirm([
+    `Enviar Break por ${slot.host}?`,
+    '',
+    'En un router que esta arrancando lo detiene en ROMMON (recuperacion de contrasena).',
+    'Con el equipo en operacion normal y config-register 0x2102 se ignora.',
+    'Los switches Catalyst no usan Break: la recuperacion es con el boton MODE.'
+  ].join('\n'));
+  if (!proceed) return;
+  const result = await window.switchConsole.sendBreak(slot.sessionId);
+  slotMessage(slot, result.ok ? 'Break enviado.' : `No se pudo enviar Break: ${result.error}`);
+});
 els.backupActiveBtn.addEventListener('click', backupCurrentProfile);
 els.backupSelectedBtn.addEventListener('click', backupCurrentProfile);
 els.compareTextBtn.addEventListener('click', compareConfigs);
@@ -600,6 +705,12 @@ function parseCsvLines(value, expectedFields) {
     .filter((parts) => parts.length >= expectedFields);
 }
 
+// 3560/3750 soportan ISL: exigen "switchport trunk encapsulation dot1q" antes de "mode trunk".
+// En 2960 y Catalyst 9000 (solo dot1q) ese comando no existe.
+function requiresTrunkEncapsulation(model) {
+  return model === 'Catalyst 3560' || model === 'Catalyst 3750';
+}
+
 function applyTemplate(model, announce = true) {
   const template = modelTemplates[model] || modelTemplates['Catalyst 2960'];
   document.querySelector('#model').value = model;
@@ -607,6 +718,7 @@ function applyTemplate(model, announce = true) {
   document.querySelector('#vlans').value = template.vlans;
   document.querySelector('#accessPorts').value = template.accessPorts;
   document.querySelector('#trunkPorts').value = template.trunkPorts;
+  document.querySelector('#nativeVlan').value = template.nativeVlan || '';
   refreshPreview();
   if (announce) showMessage(`Plantilla aplicada: ${model}. ${template.note}`);
 }
@@ -718,13 +830,13 @@ function generateConfig(mask = false) {
     lines.push(' no shutdown', ' exit');
   });
 
+  const nativeVlan = readValue('nativeVlan');
   trunkPorts.forEach(([range, ...vlansAllowed]) => {
     const allowed = vlansAllowed.join(',');
-    lines.push(
-      '',
-      `interface range ${range}`,
-      ' switchport mode trunk'
-    );
+    lines.push('', `interface range ${range}`);
+    if (requiresTrunkEncapsulation(model)) lines.push(' switchport trunk encapsulation dot1q');
+    lines.push(' switchport mode trunk');
+    if (nativeVlan) lines.push(` switchport trunk native vlan ${nativeVlan}`);
     if (allowed) lines.push(` switchport trunk allowed vlan ${allowed}`);
     lines.push(' no shutdown', ' exit');
   });
@@ -778,11 +890,26 @@ function configIssues() {
   }
 
   const mgmtVlan = readValue('mgmtVlan') || '10';
-  parseCsvLines(readValue('trunkPorts'), 2).forEach(([range, ...allowed]) => {
+  const nativeVlan = readValue('nativeVlan');
+  const trunks = parseCsvLines(readValue('trunkPorts'), 2);
+  trunks.forEach(([range, ...allowed]) => {
     if (allowed.length && !vlanListIncludes(allowed, mgmtVlan)) {
       warnings.push(`Troncal ${range}: la VLAN de gestion ${mgmtVlan} no esta en "allowed vlan".`);
     }
+    if (nativeVlan && allowed.length && !vlanListIncludes(allowed, nativeVlan)) {
+      warnings.push(`Troncal ${range}: la VLAN nativa ${nativeVlan} no esta en "allowed vlan" (el trafico sin etiqueta se descarta).`);
+    }
   });
+  if (nativeVlan && trunks.length) {
+    const id = Number(nativeVlan);
+    if (!Number.isInteger(id) || id < 1 || id > 4094) {
+      blocking.push('VLAN nativa: indique un numero entre 1 y 4094, o deje el campo vacio.');
+    } else {
+      const defined = parseCsvLines(readValue('vlans'), 2).some(([vlanId]) => Number(vlanId) === id);
+      if (!defined && id !== 1) warnings.push(`La VLAN nativa ${id} no esta en la lista de VLANs a crear.`);
+      if (String(id) === String(mgmtVlan)) warnings.push('La VLAN nativa es la misma de gestion: se recomienda una VLAN nativa sin uso.');
+    }
+  }
 
   return { blocking, warnings };
 }
@@ -790,13 +917,18 @@ function configIssues() {
 function configRisks(slot) {
   const risks = [];
   const mgmtVlan = readValue('mgmtVlan') || '10';
-  if (slot.protocol === 'telnet') risks.push('La sesion es Telnet: los secrets viajan en texto plano.');
+  if (PLAINTEXT_PROTOCOLS.includes(slot.protocol)) {
+    risks.push(`La sesion es ${slot.protocol.toUpperCase()}: los secrets viajan en texto plano.`);
+  }
   if (readValue('mgmtIp')) risks.push(`interface vlan ${mgmtVlan}: reconfigura la SVI de gestion; si cambia la IP o la VLAN se corta la sesion.`);
   if (readValue('gateway')) risks.push('ip default-gateway: un gateway incorrecto corta el acceso desde otras redes.');
   const access = parseCsvLines(readValue('accessPorts'), 2).map(([range]) => range);
   if (access.length) risks.push(`Modo access en ${access.join(', ')}: si incluye su uplink, pierde la sesion.`);
   const trunks = parseCsvLines(readValue('trunkPorts'), 2).map(([range]) => range);
   if (trunks.length) risks.push(`Troncales ${trunks.join(', ')}: "allowed vlan" reemplaza la lista actual.`);
+  if (trunks.length && readValue('nativeVlan')) {
+    risks.push(`native vlan ${readValue('nativeVlan')}: debe coincidir con el vecino; un mismatch corta el trafico sin etiqueta (CDP %NATIVE_VLAN_MISMATCH).`);
+  }
   if (state.lastGeneratedConfig.includes('spanning-tree mode')) risks.push('spanning-tree mode: cambiar el modo provoca reconvergencia en todas las VLAN.');
   risks.push(readChecked('disableTelnet') ? 'line vty 0 15: login local y solo SSH.' : 'line vty 0 15: login local.');
   if (readChecked('enableSsh') && readChecked('replaceRsaKeys')) risks.push('Reemplaza las llaves RSA: cambia la huella SSH del equipo.');
@@ -1044,4 +1176,5 @@ els.sendGeneratedBtn.addEventListener('click', sendGeneratedConfig);
 els.confirmChangesBtn.addEventListener('click', confirmChanges);
 
 loadInventory();
+applyProtocolUi();
 renderActiveSession();

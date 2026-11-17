@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('switchConsole', {
   importInventory: () => ipcRenderer.invoke('inventory:import'),
   exportInventory: (format) => ipcRenderer.invoke('inventory:export', { format }),
   backupProfile: (profile) => ipcRenderer.invoke('backup:profile', profile),
+  listSerialPorts: () => ipcRenderer.invoke('serial:list'),
+  sendBreak: (sessionId) => ipcRenderer.invoke('session:break', sessionId),
   onData: (callback) => {
     ipcRenderer.on('session:data', (_event, payload) => callback(payload));
   },
