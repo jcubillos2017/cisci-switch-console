@@ -6,6 +6,7 @@ const { Client } = require('ssh2');
 const { createSanitizedLog, renderLine } = require('./log-sanitizer');
 const { TelnetClient } = require('./telnet-client');
 const { RawClient, RloginClient } = require('./net-clients');
+const { readableNetError, NET_ERROR_CODES } = require('./net-errors');
 const { SerialClient, listSerialPorts } = require('./serial-client');
 
 const PROTOCOLS = ['ssh', 'telnet', 'raw', 'rlogin', 'serial'];
@@ -182,14 +183,32 @@ function sshReadyTimeout(profile) {
   return Math.min(Math.max(timeout, 10000), 120000);
 }
 
-function readableSshError(error) {
+// context: { host, port, timeout, tcpConnected, username }
+function readableSshError(error, context = {}) {
   const message = error && error.message ? error.message : String(error || 'Error SSH');
+  const { host, port = 22, timeout = 45000, tcpConnected = false, username = '' } = context;
+  const target = { host, port, timeout, protocol: 'ssh' };
+
   if (/handshake/i.test(message) && /timed out/i.test(message)) {
+    // ssh2 usa el mismo timeout para el TCP y la negociacion: se distingue si el puerto llego a responder.
+    if (!tcpConnected) {
+      const timeoutError = new Error(message);
+      timeoutError.code = 'ETIMEDOUT';
+      return readableNetError(timeoutError, target);
+    }
     return [
-      'SSH no completo el handshake a tiempo.',
-      'Revise que el puerto sea SSH, que el switch tenga SSH habilitado y pruebe aumentar el timeout o activar "Cisco legacy SSH".',
-      `Detalle: ${message}`
+      `El puerto ${port} respondio pero SSH no completo la negociacion a tiempo.`,
+      'Revise que sea el puerto SSH, que el switch tenga SSH habilitado (llaves RSA, ip ssh version 2) y pruebe aumentar el timeout o activar "Cisco legacy SSH".'
     ].join(' ');
+  }
+  if (error && NET_ERROR_CODES.includes(error.code)) {
+    return `${readableNetError(error, target)} (${error.code})`;
+  }
+  if ((error && error.level === 'client-authentication') || /authentication methods failed/i.test(message)) {
+    return `Autenticacion rechazada${username ? ` para "${username}"` : ''}: usuario o contrasena incorrectos, o el servidor AAA (TACACS+/RADIUS) no autoriza al usuario.`;
+  }
+  if (/no matching|handshake failed/i.test(message)) {
+    return `El equipo y la app no comparten algoritmos SSH: active "Cisco legacy SSH" para IOS antiguos. Detalle: ${message}`;
   }
   return message;
 }
@@ -339,8 +358,18 @@ function openSshShell(profile) {
       if (settled) return;
       settled = true;
       conn.end();
-      reject(new Error(readableSshError(error)));
+      reject(new Error(readableSshError(error, {
+        host: profile.host,
+        port: Number(profile.port || 22),
+        timeout: sshReadyTimeout(profile),
+        tcpConnected,
+        username: profile.username
+      })));
     };
+    let tcpConnected = false;
+    conn.on('connect', () => {
+      tcpConnected = true;
+    });
     conn.on('ready', () => {
       conn.shell({ term: 'vt100', cols: 200, rows: 48 }, (err, stream) => {
         if (err) {
@@ -541,6 +570,18 @@ function connectSsh(session, profile, port) {
       resolve(result);
     };
 
+    let tcpConnected = false;
+    const errorContext = () => ({
+      host: profile.host,
+      port,
+      timeout: sshReadyTimeout(profile),
+      tcpConnected,
+      username: profile.username
+    });
+    conn.on('connect', () => {
+      tcpConnected = true;
+    });
+
     conn.on('ready', () => {
       conn.shell({
         term: 'xterm-color',
@@ -554,7 +595,7 @@ function connectSsh(session, profile, port) {
             message: err.message
           });
           closeSession(session.sessionId, 'No se pudo abrir shell SSH');
-          finish({ ok: false, sessionId: session.sessionId, error: readableSshError(err) });
+          finish({ ok: false, sessionId: session.sessionId, error: readableSshError(err, errorContext()) });
           return;
         }
 
@@ -585,7 +626,7 @@ function connectSsh(session, profile, port) {
     });
 
     conn.on('error', (err) => {
-      const message = readableSshError(err);
+      const message = readableSshError(err, errorContext());
       sendToWindow(session.window, 'session:status', {
         sessionId: session.sessionId,
         status: 'error',

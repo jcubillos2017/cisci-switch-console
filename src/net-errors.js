@@ -1,5 +1,6 @@
 // Mensajes legibles para errores de conexion TCP (Telnet, TCP raw, Rlogin).
 const REFUSED_HINTS = {
+  ssh: 'el puerto no acepta SSH (SSH deshabilitado, "transport input" sin ssh o puerto incorrecto)',
   telnet: 'el puerto no acepta Telnet (line vty con "transport input ssh" o puerto incorrecto)',
   raw: 'nadie escucha en ese puerto (revise el puerto TCP del servidor de consolas)',
   rlogin: 'el equipo no acepta Rlogin (IOS-XE y la mayoria de IOS no lo ofrecen como servidor)'
@@ -25,4 +26,6 @@ function readableNetError(error, { host, port, timeout = 15000, protocol = 'teln
   }
 }
 
-module.exports = { readableNetError };
+const NET_ERROR_CODES = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET'];
+
+module.exports = { readableNetError, NET_ERROR_CODES };
