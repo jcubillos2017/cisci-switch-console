@@ -17,5 +17,8 @@ contextBridge.exposeInMainWorld('switchConsole', {
   },
   onStatus: (callback) => {
     ipcRenderer.on('session:status', (_event, payload) => callback(payload));
+  },
+  onBackupProgress: (callback) => {
+    ipcRenderer.on('backup:progress', (_event, payload) => callback(payload));
   }
 });

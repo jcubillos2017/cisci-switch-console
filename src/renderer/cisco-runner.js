@@ -1,5 +1,10 @@
 // Ejecutor de comandos Cisco IOS linea a linea.
 // Envia cada comando, espera el prompt (o responde preguntas conocidas) y se detiene ante errores.
+// Opciones por paso:
+//   timeout        inactividad maxima en ms (se reinicia con cada dato recibido)
+//   answers        [{ pattern, reply, max }] respuestas a preguntas; max = usos permitidos
+//   expectHostname solo acepta el prompt con ese hostname (evita falsos prompts en salidas largas)
+//   errorScope     'head' revisa errores CLI solo en las primeras lineas (para show con banners)
 (function (root) {
   const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
   const PROMPT_AT_END = /(?:^|[\r\n])([A-Za-z0-9._\-]+)(\([A-Za-z0-9._\-]+\))?([#>])[ \t]*$/;
@@ -42,7 +47,11 @@
     function execute(step) {
       const command = step.command;
       const answers = step.answers || [];
+      const answerUses = answers.map(() => 0);
       const timeout = step.timeout || defaultTimeout(command);
+      // 'head': IOS muestra el error justo despues del eco (y del marcador ^); el resto puede ser contenido (banners).
+      const headLines = (text) => text.split(/\r?\n|\r/).filter((line) => line.trim()).slice(0, 4).join('\n');
+      const findCliError = (text) => (step.errorScope === 'head' ? headLines(text) : text).match(CLI_ERROR);
 
       return new Promise((resolve, reject) => {
         let full = '';
@@ -66,12 +75,17 @@
             return;
           }
 
-          for (const answer of answers) {
-            if (answer.pattern.test(pending)) {
-              pending = '';
-              write(answer.reply);
+          for (let index = 0; index < answers.length; index += 1) {
+            const answer = answers[index];
+            if (!answer.pattern.test(pending)) continue;
+            if (answerUses[index] >= (answer.max || Infinity)) {
+              finish(new RunnerError('rejected', `El equipo repitio la pregunta "${lastLine(pending)}" (respuesta rechazada).`, full));
               return;
             }
+            answerUses[index] += 1;
+            pending = '';
+            write(answer.reply);
+            return;
           }
 
           if (ANY_QUESTION.test(pending)) {
@@ -81,8 +95,9 @@
 
           const promptMatch = pending.match(PROMPT_AT_END);
           if (!promptMatch) return;
+          if (step.expectHostname && promptMatch[1] !== step.expectHostname) return;
 
-          const cliError = full.match(CLI_ERROR);
+          const cliError = findCliError(full);
           if (cliError) {
             finish(new RunnerError('cli', cliError[0].trim(), full));
             return;
@@ -90,23 +105,29 @@
           finish(null, { command, output: full, prompt: parsePrompt(promptMatch) });
         };
 
+        const onTimeout = () => {
+          // Prompt seguido de mensajes asincronos (syslog): se acepta si existe una linea de prompt.
+          const lines = pending.split(/\r?\n|\r/).map((line) => line.trim());
+          const promptLine = lines.slice(1).reverse().find((line) => {
+            const match = line.match(PROMPT_LINE);
+            return match && (!step.expectHostname || match[1] === step.expectHostname);
+          });
+          if (promptLine && !findCliError(full)) {
+            finish(null, { command, output: full, prompt: parsePrompt(promptLine.match(PROMPT_LINE)) });
+            return;
+          }
+          finish(new RunnerError('timeout', `Sin respuesta del equipo durante ${Math.round(timeout / 1000)} s.`, full));
+        };
+        let timer = setTimeout(onTimeout, timeout);
+
         const unsubscribe = subscribe((chunk) => {
           const clean = String(chunk).replace(ANSI, '');
           full += clean;
           pending += clean;
+          clearTimeout(timer);
+          timer = setTimeout(onTimeout, timeout);
           evaluate();
         });
-
-        const timer = setTimeout(() => {
-          // Prompt seguido de mensajes asincronos (syslog): se acepta si existe una linea de prompt.
-          const lines = pending.split(/\r?\n|\r/).map((line) => line.trim());
-          const promptLine = lines.slice(1).reverse().find((line) => PROMPT_LINE.test(line));
-          if (promptLine && !CLI_ERROR.test(full)) {
-            finish(null, { command, output: full, prompt: parsePrompt(promptLine.match(PROMPT_LINE)) });
-            return;
-          }
-          finish(new RunnerError('timeout', `Sin respuesta del equipo despues de ${Math.round(timeout / 1000)} s.`, full));
-        }, timeout);
 
         abortCurrent = (reason) => finish(new RunnerError('aborted', reason, full));
         write(`${command}\r`);

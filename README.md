@@ -77,6 +77,16 @@ El archivo `.dmg` queda en `dist`. Ver detalles en `MAC-INSTALL.md`.
 
 El generador no incluye credenciales por defecto: el secret del usuario local es obligatorio y el enable secret solo se modifica si se completa. En Catalyst 9200/9300 se usa `algorithm-type scrypt`.
 
+## Respaldo automatico
+
+"Respaldar" abre una sola sesion SSH y:
+
+1. Detecta el prompt; si el usuario entra en user EXEC (`>`), ejecuta `enable` con el enable secret guardado en el perfil (un solo intento).
+2. Verifica `show privilege`: con privilegio menor a 15, `show running-config` saldria parcial y el respaldo se cancela.
+3. Desactiva la paginacion (`terminal length 0`, o `terminal datadump` en Small Business CBS); si el equipo no lo acepta, responde `--More--` automaticamente.
+4. Captura `show running-config` y `show startup-config` esperando el prompt exacto del hostname (los banners con `#` o `% Error` no cortan la captura).
+5. Solo guarda la running-config si termina en `end`; si el equipo no tiene startup-config lo informa como aviso.
+
 ## Seguridad recomendada
 
 - Preferir SSH sobre Telnet.

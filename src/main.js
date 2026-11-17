@@ -4,7 +4,8 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const { Client } = require('ssh2');
-const { createSanitizedLog } = require('./log-sanitizer');
+const { createSanitizedLog, renderLine } = require('./log-sanitizer');
+const { create: createRunner } = require('./renderer/cisco-runner');
 
 const sessions = new Map();
 
@@ -69,8 +70,8 @@ function readInventory() {
 
 // Lo que ve el renderer: nunca la contrasena ni el cifrado, solo si existe.
 function toPublicProfile(profile) {
-  const { password: _password, passwordEnc, ...rest } = profile;
-  return { ...rest, hasPassword: Boolean(passwordEnc) };
+  const { password: _password, passwordEnc, enableEnc, ...rest } = profile;
+  return { ...rest, hasPassword: Boolean(passwordEnc), hasEnableSecret: Boolean(enableEnc) };
 }
 
 function publicInventory(inventory) {
@@ -81,18 +82,26 @@ function publicInventory(inventory) {
 }
 
 function exportableProfile(profile) {
-  const { password: _password, passwordEnc: _passwordEnc, ...rest } = profile;
+  const { password: _password, passwordEnc: _passwordEnc, enableEnc: _enableEnc, ...rest } = profile;
   return rest;
 }
 
 // Contrasena para conectar: la escrita en el formulario o la guardada del perfil (mismo host).
-function resolvePassword(profile) {
-  if (profile.password) return String(profile.password);
+function resolveStoredSecret(profile, typed, field) {
+  if (typed) return String(typed);
   if (!profile.id) return '';
   const stored = readInventory().profiles.find((item) => item.id === profile.id);
-  if (!stored || !stored.passwordEnc) return '';
+  if (!stored || !stored[field]) return '';
   if (String(stored.host || '').trim() !== String(profile.host || '').trim()) return '';
-  return decryptSecret(stored.passwordEnc);
+  return decryptSecret(stored[field]);
+}
+
+function resolvePassword(profile) {
+  return resolveStoredSecret(profile, profile.password, 'passwordEnc');
+}
+
+function resolveEnableSecret(profile) {
+  return resolveStoredSecret(profile, profile.enableSecret, 'enableEnc');
 }
 
 function writeInventory(inventory) {
@@ -291,52 +300,30 @@ function backupDir(profileName) {
   return dir;
 }
 
-function captureCiscoCommand(profile, command) {
+// --- Respaldo por SSH: una conexion, enable si hace falta, prompt exacto y validacion del contenido.
+const BACKUP_PROMPT_LINE = /^[A-Za-z0-9._\-]+(\([A-Za-z0-9._\-]+\))?[#>]\s*$/;
+
+function openSshShell(profile) {
   return new Promise((resolve, reject) => {
-    if (profile.protocol === 'telnet') {
-      reject(new Error('El respaldo automatico esta disponible por SSH. Para Telnet use la terminal manual.'));
-      return;
-    }
-
     const conn = new Client();
-    let output = '';
-    let idleTimer = null;
     let settled = false;
-
-    const finish = (error) => {
+    const fail = (error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(idleTimer);
       conn.end();
-      if (error) reject(error);
-      else resolve(cleanCiscoOutput(output, command));
+      reject(new Error(readableSshError(error)));
     };
-
     conn.on('ready', () => {
-      conn.shell({ term: 'vt100', cols: 160, rows: 48 }, (err, stream) => {
+      conn.shell({ term: 'vt100', cols: 200, rows: 48 }, (err, stream) => {
         if (err) {
-          finish(err);
+          fail(err);
           return;
         }
-
-        stream.on('data', (data) => {
-          output += data.toString('utf8');
-          clearTimeout(idleTimer);
-          idleTimer = setTimeout(() => finish(), 1800);
-        });
-        stream.stderr.on('data', (data) => {
-          output += data.toString('utf8');
-        });
-        stream.on('close', () => finish());
-
-        setTimeout(() => {
-          stream.write('terminal length 0\n');
-          setTimeout(() => stream.write(`${command}\n`), 350);
-        }, 500);
+        settled = true;
+        resolve({ conn, stream });
       });
     });
-
-    conn.on('error', finish);
+    conn.on('error', fail);
     conn.connect({
       host: profile.host,
       port: Number(profile.port || 22),
@@ -351,16 +338,126 @@ function captureCiscoCommand(profile, command) {
   });
 }
 
-function cleanCiscoOutput(output, command) {
-  return output
-    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
-    .split(/\r?\n/)
-    .filter((line) => {
-      const trimmed = line.trim();
-      return trimmed && trimmed !== 'terminal length 0' && trimmed !== command;
-    })
-    .join('\n')
-    .trim();
+// Quita el eco del comando y el prompt final; reconstruye lineas (ANSI, backspace, --More--).
+function cleanShowOutput(output, command) {
+  const lines = String(output).split('\n').map(renderLine);
+  const echo = lines.findIndex((line) => line.trim().endsWith(command));
+  let start = echo === -1 ? 0 : echo + 1;
+  let end = lines.length;
+  while (start < end && !lines[start].trim()) start += 1;
+  while (end > start && (!lines[end - 1].trim() || BACKUP_PROMPT_LINE.test(lines[end - 1].trim()))) end -= 1;
+  return lines.slice(start, end).join('\n');
+}
+
+function hasEndLine(config) {
+  return /^end\s*$/m.test(config);
+}
+
+async function runBackup(profile, enableSecret, progress) {
+  const { conn, stream } = await openSshShell(profile);
+  const listeners = new Set();
+  const dispatch = (data) => {
+    const text = data.toString('utf8');
+    listeners.forEach((listener) => listener(text));
+  };
+  let closed = false;
+  const runner = createRunner({
+    write: (data) => {
+      if (!closed) stream.write(data);
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    }
+  });
+  stream.on('data', dispatch);
+  stream.stderr.on('data', dispatch);
+  stream.on('close', () => {
+    closed = true;
+    runner.abort('El equipo cerro la sesion SSH durante el respaldo.');
+  });
+
+  const warnings = [];
+  try {
+    progress('Esperando prompt del equipo...');
+    let [probe] = await runner.run([{ command: '', timeout: 20000 }]);
+
+    if (!probe.prompt.privileged) {
+      if (!enableSecret) {
+        throw new Error('El usuario entra en user EXEC (>). Guarde el enable secret en el perfil o use un usuario privilege 15.');
+      }
+      progress('Entrando a privileged EXEC (enable)...');
+      try {
+        [probe] = await runner.run([{
+          command: 'enable',
+          answers: [{ pattern: /Password:\s*$/i, reply: `${enableSecret}\r`, max: 1 }],
+          timeout: 15000
+        }]);
+      } catch (error) {
+        if (error.kind === 'rejected' || error.kind === 'cli') {
+          throw new Error('El equipo rechazo el enable secret guardado en el perfil.');
+        }
+        throw error;
+      }
+      if (!probe.prompt.privileged) throw new Error('enable no fue aceptado: revise el enable secret guardado en el perfil.');
+    }
+    if (probe.prompt.mode) [probe] = await runner.run([{ command: 'end', timeout: 10000 }]);
+    const hostname = probe.prompt.hostname;
+
+    const [privilege] = await runner.run([{ command: 'show privilege', timeout: 15000, expectHostname: hostname }]);
+    const levelMatch = /privilege level is (\d+)/i.exec(privilege.output);
+    const level = levelMatch ? Number(levelMatch[1]) : null;
+    if (level !== null && level < 15) {
+      throw new Error(`Privilegio ${level}: show running-config mostraria solo una parte de la configuracion. Use privilege 15.`);
+    }
+
+    // Sin paginacion: IOS usa "terminal length 0"; Small Business CBS usa "terminal datadump".
+    try {
+      await runner.run([{ command: 'terminal length 0', timeout: 10000, expectHostname: hostname }]);
+    } catch (error) {
+      if (error.kind !== 'cli') throw error;
+      try {
+        await runner.run([{ command: 'terminal datadump', timeout: 10000, expectHostname: hostname }]);
+      } catch (fallbackError) {
+        if (fallbackError.kind !== 'cli') throw fallbackError;
+        warnings.push('El equipo no acepto desactivar la paginacion; se respondio --More-- automaticamente.');
+      }
+    }
+    try {
+      await runner.run([{ command: 'terminal width 512', timeout: 10000, expectHostname: hostname }]);
+    } catch (error) {
+      if (error.kind !== 'cli') throw error;
+    }
+
+    const capture = async (command) => {
+      progress(`Ejecutando ${command}...`);
+      const [result] = await runner.run([{ command, timeout: 60000, expectHostname: hostname, errorScope: 'head' }]);
+      return cleanShowOutput(result.output, command);
+    };
+
+    const running = await capture('show running-config');
+    if (!hasEndLine(running)) {
+      throw new Error('La running-config recibida no termina en "end": el respaldo estaria incompleto y no se guardo.');
+    }
+
+    let startup = await capture('show startup-config');
+    if (/not present|no hay|is empty/i.test(startup) && !hasEndLine(startup)) {
+      warnings.push('El equipo no tiene startup-config guardada (nunca se ejecuto write memory).');
+      startup = '';
+    } else if (!hasEndLine(startup)) {
+      warnings.push('La startup-config recibida no termina en "end"; revise el archivo.');
+    }
+
+    try {
+      await runner.run([{ command: 'exit', timeout: 3000 }]);
+    } catch (_error) {
+      // El equipo cierra la sesion con exit: no es un error.
+    }
+    return { hostname, level, running, startup, warnings };
+  } finally {
+    closed = true;
+    conn.end();
+  }
 }
 
 ipcMain.handle('session:connect', async (event, profile) => {
@@ -569,13 +666,17 @@ ipcMain.handle('inventory:save-profile', async (_event, profile) => {
   const existing = index >= 0 ? inventory.profiles[index] : null;
   const store = secureStorageStatus();
 
-  // "Recordar contrasena": nueva si se escribio, la anterior si el campo quedo vacio.
-  let passwordEnc = '';
-  if (profile.savePassword && store.available) {
-    if (profile.password) passwordEnc = encryptSecret(profile.password);
-    else if (existing && existing.passwordEnc) passwordEnc = existing.passwordEnc;
-  }
-  const record = passwordEnc ? { ...normalized, passwordEnc } : normalized;
+  // "Recordar contrasenas": nueva si se escribio, la anterior si el campo quedo vacio.
+  const keep = (typed, field) => {
+    if (!profile.savePassword || !store.available) return '';
+    if (typed) return encryptSecret(typed);
+    return (existing && existing[field]) || '';
+  };
+  const passwordEnc = keep(profile.password, 'passwordEnc');
+  const enableEnc = keep(profile.enableSecret, 'enableEnc');
+  const record = { ...normalized };
+  if (passwordEnc) record.passwordEnc = passwordEnc;
+  if (enableEnc) record.enableEnc = enableEnc;
 
   if (index >= 0) inventory.profiles[index] = record;
   else inventory.profiles.push(record);
@@ -584,7 +685,8 @@ ipcMain.handle('inventory:save-profile', async (_event, profile) => {
     ok: true,
     profile: toPublicProfile(record),
     inventory: publicInventory(inventory),
-    passwordStored: Boolean(passwordEnc)
+    passwordStored: Boolean(passwordEnc),
+    enableStored: Boolean(enableEnc)
   };
 });
 
@@ -640,23 +742,42 @@ ipcMain.handle('inventory:export', async (_event, { format }) => {
   return { ok: true, filePath: result.filePath };
 });
 
-ipcMain.handle('backup:profile', async (_event, profile) => {
+ipcMain.handle('backup:profile', async (event, profile) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const progress = (message) => sendToWindow(window, 'backup:progress', { message });
   const normalized = { ...normalizeProfile(profile), password: resolvePassword(profile) };
-  const dir = backupDir(normalized.name || normalized.host);
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const running = await captureCiscoCommand(normalized, 'show running-config');
-  const startup = await captureCiscoCommand(normalized, 'show startup-config');
-  const runningPath = path.join(dir, `${stamp}_running-config.cfg`);
-  const startupPath = path.join(dir, `${stamp}_startup-config.cfg`);
-  fs.writeFileSync(runningPath, running, 'utf8');
-  fs.writeFileSync(startupPath, startup, 'utf8');
-  return {
-    ok: true,
-    running,
-    startup,
-    runningPath,
-    startupPath
-  };
+  if (normalized.protocol === 'telnet') {
+    return { ok: false, error: 'El respaldo automatico usa SSH. Para Telnet ejecute los comandos manualmente en la terminal.' };
+  }
+
+  try {
+    progress(`Conectando por SSH a ${normalized.host}...`);
+    const result = await runBackup(normalized, resolveEnableSecret(profile), progress);
+    const dir = backupDir(normalized.name || result.hostname || normalized.host);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const runningPath = path.join(dir, `${stamp}_running-config.cfg`);
+    fs.writeFileSync(runningPath, `${result.running}\n`, 'utf8');
+    let startupPath = '';
+    if (result.startup) {
+      startupPath = path.join(dir, `${stamp}_startup-config.cfg`);
+      fs.writeFileSync(startupPath, `${result.startup}\n`, 'utf8');
+    }
+    return {
+      ok: true,
+      hostname: result.hostname,
+      privilegeLevel: result.level,
+      running: result.running,
+      startup: result.startup,
+      runningPath,
+      startupPath,
+      runningLines: result.running.split('\n').length,
+      startupLines: result.startup ? result.startup.split('\n').length : 0,
+      warnings: result.warnings
+    };
+  } catch (error) {
+    const where = error.step && error.step.command ? ` (comando: "${error.step.command}")` : '';
+    return { ok: false, error: `${error.message}${where}` };
+  }
 });
 
 app.whenReady().then(createWindow);

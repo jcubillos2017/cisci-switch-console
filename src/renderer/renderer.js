@@ -17,6 +17,7 @@ const els = {
   username: document.querySelector('#username'),
   password: document.querySelector('#password'),
   savePassword: document.querySelector('#savePassword'),
+  profileEnableSecret: document.querySelector('#profileEnableSecret'),
   sshTimeout: document.querySelector('#sshTimeout'),
   legacyCiscoSsh: document.querySelector('#legacyCiscoSsh'),
   enableLog: document.querySelector('#enableLog'),
@@ -182,9 +183,15 @@ renderActiveSession();
 
 // La contrasena guardada nunca vuelve al formulario: solo se indica que existe.
 function setPasswordField(profile, keepValue = false) {
-  if (!keepValue) els.password.value = '';
+  if (!keepValue) {
+    els.password.value = '';
+    els.profileEnableSecret.value = '';
+  }
   els.password.placeholder = profile && profile.hasPassword ? 'Guardada (cifrada) - escriba para reemplazar' : '';
-  els.savePassword.checked = Boolean(profile && profile.hasPassword);
+  els.profileEnableSecret.placeholder = profile && profile.hasEnableSecret
+    ? 'Guardado (cifrado) - escriba para reemplazar'
+    : 'Solo si el usuario entra en modo >';
+  els.savePassword.checked = Boolean(profile && (profile.hasPassword || profile.hasEnableSecret));
   applySecureStorageStatus();
 }
 
@@ -224,7 +231,7 @@ function renderInventory() {
         <td>${escapeHtml(profile.model)}</td>
         <td class="muted">${escapeHtml(profile.site)}</td>
         <td>${escapeHtml((profile.protocol || 'ssh').toUpperCase())}:${escapeHtml(profile.port)}</td>
-        <td class="muted">${profile.hasPassword ? 'Cifrada' : '-'}</td>
+        <td class="muted">${[profile.hasPassword ? 'Cifrada' : '', profile.hasEnableSecret ? 'enable' : ''].filter(Boolean).join(' + ') || '-'}</td>
         <td><button type="button" data-load-profile="${escapeHtml(profile.id)}">Cargar</button></td>
       </tr>
     `)
@@ -274,11 +281,13 @@ async function saveCurrentProfile() {
   state.currentProfileId = result.profile.id;
   renderInventory();
   // Si se cifro, se limpia el campo; si no se guardo, se conserva lo escrito para conectar.
-  setPasswordField(result.profile, !result.passwordStored);
+  setPasswordField(result.profile, !result.passwordStored && !result.enableStored);
 
   const status = result.inventory.secureStorage || {};
-  let note = 'sin contrasena guardada';
-  if (result.passwordStored) note = 'contrasena cifrada';
+  let note = 'sin contrasenas guardadas';
+  if (result.passwordStored && result.enableStored) note = 'contrasena y enable secret cifrados';
+  else if (result.passwordStored) note = 'contrasena cifrada';
+  else if (result.enableStored) note = 'enable secret cifrado';
   else if (profile.savePassword && !status.available) note = `contrasena no guardada: ${status.reason}`;
   showMessage(`Perfil guardado: ${result.profile.name} (${note}).`);
 }
@@ -382,6 +391,7 @@ function connectionProfile() {
     username: els.username.value.trim(),
     password: els.password.value,
     savePassword: els.savePassword.checked,
+    enableSecret: els.profileEnableSecret.value,
     sshTimeout: Number(els.sshTimeout.value || 45000),
     legacyCiscoSsh: els.legacyCiscoSsh.checked,
     enableLog: els.enableLog.checked,
@@ -464,7 +474,15 @@ function setBackupStatus(status, message) {
   els.backupStatus.textContent = message;
 }
 
+let backupRunning = false;
+
+window.switchConsole.onBackupProgress(({ message }) => {
+  if (!backupRunning) return;
+  els.backupResult.value = `${els.backupResult.value}\n${message}`;
+});
+
 async function backupCurrentProfile() {
+  if (backupRunning) return;
   const profile = connectionProfile();
   if (!profile.host) {
     setBackupStatus('error', 'Sin host');
@@ -477,8 +495,12 @@ async function backupCurrentProfile() {
     return;
   }
 
+  backupRunning = true;
+  els.backupActiveBtn.disabled = true;
+  els.backupSelectedBtn.disabled = true;
+  document.querySelector('[data-tab="backup"]').click();
   setBackupStatus('connecting', 'Respaldando');
-  els.backupResult.value = `Conectando por SSH a ${profile.host}...\nEjecutando show running-config y show startup-config.`;
+  els.backupResult.value = `Respaldo de ${profile.name || profile.host} (${profile.host})`;
 
   try {
     const result = await window.switchConsole.backupProfile(profile);
@@ -487,15 +509,22 @@ async function backupCurrentProfile() {
     els.runningConfigText.value = result.running;
     els.startupConfigText.value = result.startup;
     els.backupResult.value = [
-      'Respaldo completado.',
-      `Running-config: ${result.runningPath}`,
-      `Startup-config: ${result.startupPath}`
+      `Respaldo completado: ${result.hostname} (privilegio ${result.privilegeLevel ?? '?'}).`,
+      `Running-config (${result.runningLines} lineas): ${result.runningPath}`,
+      result.startupPath
+        ? `Startup-config (${result.startupLines} lineas): ${result.startupPath}`
+        : 'Startup-config: no guardada (el equipo no tiene startup-config).',
+      ...result.warnings.map((warning) => `Aviso: ${warning}`)
     ].join('\n');
-    setBackupStatus('connected', 'Completado');
+    setBackupStatus(result.warnings.length ? 'connecting' : 'connected', result.warnings.length ? 'Con avisos' : 'Completado');
     compareConfigs();
   } catch (error) {
     setBackupStatus('error', 'Error');
-    els.backupResult.value = `No se pudo completar el respaldo.\n${error.message}`;
+    els.backupResult.value = `${els.backupResult.value}\n\nNo se pudo completar el respaldo.\n${error.message}`;
+  } finally {
+    backupRunning = false;
+    els.backupActiveBtn.disabled = false;
+    els.backupSelectedBtn.disabled = false;
   }
 }
 
