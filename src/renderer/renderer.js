@@ -95,6 +95,9 @@ const sessions = window.TerminalSessions.create({
   },
   tabFlags: (slot) => ({ rollback: Boolean(slot.host && rollbacks.has(slot.host)), running: slot.scriptRunning }),
   estimateSize: () => terminalSize(),
+  onCopy: (slot) => copySelection(slot),
+  onPaste: (slot, text) => pasteToSlot(slot, text),
+  onContextMenu: (slot) => showTerminalMenu(slot),
   onChange: () => renderActiveSession()
 });
 
@@ -683,6 +686,88 @@ document.querySelectorAll('.macro').forEach((button) => {
 });
 
 els.clearTerminalBtn.addEventListener('click', () => sessions.active().term.clear());
+
+// --- Copiar y pegar en la terminal
+const PASTE_PREVIEW_LINES = 8;
+
+async function copySelection(slot) {
+  const text = slot.term.getSelection();
+  if (!text) return;
+  await window.switchConsole.clipboardWrite(text);
+  slot.term.clearSelection();
+  const lines = text.split(/\r?\n/).length;
+  slotMessage(slot, `Copiado al portapapeles (${lines} ${lines === 1 ? 'linea' : 'lineas'}).`);
+}
+
+// Pegado seguro: una linea se pega sin Enter extra; varias lineas piden confirmacion
+// (cada una se ejecuta como comando) y se envian pausadas para no saturar la consola.
+async function pasteToSlot(slot, rawText) {
+  if (!rawText) return;
+  if (!slot.sessionId || !slot.connected) {
+    slotMessage(slot, 'No hay una sesion activa en esta terminal para pegar.');
+    return;
+  }
+  if (slot.scriptRunning || slot.pasting) {
+    slotMessage(slot, 'Hay un envio en curso en esta terminal; espere a que termine.');
+    return;
+  }
+
+  let text = String(rawText).replace(/\r\n?/g, '\n');
+  const endsWithNewline = text.endsWith('\n');
+  if (endsWithNewline) text = text.slice(0, -1);
+  const lines = text.split('\n');
+
+  if (lines.length === 1) {
+    // Una linea copiada con su salto final: se pega sin ejecutar (el usuario presiona Enter).
+    await sessions.write(slot, lines[0]);
+    return;
+  }
+
+  const preview = lines.slice(0, PASTE_PREVIEW_LINES).map((line) => `  ${line}`).join('\n');
+  const more = lines.length > PASTE_PREVIEW_LINES ? `\n  ... (${lines.length - PASTE_PREVIEW_LINES} lineas mas)` : '';
+  const proceed = window.confirm([
+    `Pegar ${lines.length} lineas en ${slotLabel(slot)} (${slot.host})?`,
+    'Cada linea se envia como un comando al equipo.',
+    rollbacks.has(slot.host) ? 'Hay un rollback programado en este equipo.' : '',
+    '',
+    `${preview}${more}`,
+    '',
+    'Ctrl+C en la terminal cancela el pegado.'
+  ].filter((line, index) => line || index !== 2).join('\n'));
+  if (!proceed) return;
+
+  const delay = slot.protocol === 'serial' ? 150 : 30;
+  slot.pasting = true;
+  slot.pasteAbort = false;
+  let sent = 0;
+  try {
+    for (let index = 0; index < lines.length; index += 1) {
+      if (slot.pasteAbort || !slot.connected) break;
+      const isLast = index === lines.length - 1;
+      // La ultima linea solo lleva Enter si el texto copiado terminaba en salto de linea.
+      await sessions.write(slot, isLast && !endsWithNewline ? lines[index] : `${lines[index]}\r`);
+      sent += 1;
+      if (!isLast) await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  } finally {
+    slot.pasting = false;
+  }
+  slotMessage(slot, slot.pasteAbort
+    ? `Pegado cancelado: se enviaron ${sent} de ${lines.length} lineas.`
+    : `Pegadas ${sent} lineas.`);
+}
+
+async function showTerminalMenu(slot) {
+  const action = await window.switchConsole.terminalMenu({
+    hasSelection: slot.term.hasSelection(),
+    connected: Boolean(slot.sessionId && slot.connected)
+  });
+  if (action === 'copy') await copySelection(slot);
+  if (action === 'paste') await pasteToSlot(slot, await window.switchConsole.clipboardRead());
+  if (action === 'selectAll') slot.term.selectAll();
+  if (action === 'clear') slot.term.clear();
+  slot.term.focus();
+}
 
 els.breakBtn.addEventListener('click', async () => {
   const slot = sessions.active();

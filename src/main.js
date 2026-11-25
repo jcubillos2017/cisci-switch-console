@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, safeStorage, clipboard, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -768,6 +768,38 @@ ipcMain.handle('session:break', async (_event, sessionId) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+});
+
+// Portapapeles desde el proceso principal (el renderer esta aislado).
+ipcMain.handle('clipboard:read', async () => clipboard.readText());
+ipcMain.handle('clipboard:write', async (_event, text) => {
+  clipboard.writeText(String(text || ''));
+  return { ok: true };
+});
+
+// Menu contextual de la terminal: devuelve la accion elegida o null.
+ipcMain.handle('terminal:context-menu', async (event, { hasSelection = false, connected = false } = {}) => {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  const mac = process.platform === 'darwin';
+  return new Promise((resolve) => {
+    // En algunas plataformas el cierre del menu llega antes que el clic: el clic resuelve
+    // de inmediato y el cierre sin eleccion espera un instante.
+    const item = (label, action, accelerator, enabled = true) => ({
+      label,
+      accelerator,
+      enabled,
+      registerAccelerator: false,
+      click: () => resolve(action)
+    });
+    const menu = Menu.buildFromTemplate([
+      item('Copiar', 'copy', mac ? 'Cmd+C' : 'Ctrl+C', hasSelection),
+      item('Pegar', 'paste', mac ? 'Cmd+V' : 'Ctrl+V', connected),
+      { type: 'separator' },
+      item('Seleccionar todo', 'selectAll'),
+      item('Limpiar terminal', 'clear')
+    ]);
+    menu.popup({ window, callback: () => setTimeout(() => resolve(null), 200) });
+  });
 });
 
 ipcMain.handle('serial:list', async () => {

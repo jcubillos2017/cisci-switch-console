@@ -8,6 +8,22 @@
       .replace(/"/g, '&quot;');
   }
 
+  const IS_MAC = /Mac/i.test((root.navigator && root.navigator.platform) || '');
+
+  // Atajos tipo Windows Terminal/PuTTY: Ctrl+C copia solo si hay seleccion (si no, envia la interrupcion).
+  function clipboardAction(event, term) {
+    const key = String(event.key || '').toLowerCase();
+    const primary = IS_MAC ? event.metaKey : event.ctrlKey;
+    if (primary && !event.altKey && event.code === 'KeyC') {
+      if (event.shiftKey || term.hasSelection()) return 'copy';
+      return null;
+    }
+    if (event.ctrlKey && !event.shiftKey && key === 'insert') return 'copy';
+    if (primary && !event.altKey && event.code === 'KeyV') return 'paste';
+    if (event.shiftKey && !event.ctrlKey && key === 'insert') return 'paste';
+    return null;
+  }
+
   function create(options) {
     const {
       container,
@@ -18,6 +34,9 @@
       maxSlots = 10,
       terminalOptions = {},
       onChange = () => {},
+      onCopy = () => {},
+      onPaste = () => {},
+      onContextMenu = () => {},
       tabFlags = () => ({}),
       estimateSize = () => ({ cols: 100, rows: 32 })
     } = options;
@@ -63,7 +82,9 @@
         protocol: '',
         name: '',
         listeners: new Set(),
-        scriptRunning: false
+        scriptRunning: false,
+        pasting: false,
+        pasteAbort: false
       };
 
       slot.runner = root.CiscoRunner.create({
@@ -77,14 +98,44 @@
       });
 
       term.onData((data) => {
+        // Durante un pegado de varias lineas solo se acepta Ctrl+C, que lo cancela.
+        if (slot.pasting) {
+          if (data === '\x03') slot.pasteAbort = true;
+          return;
+        }
         if (slot.scriptRunning || !slot.connected || !slot.sessionId) return;
         api.write(slot.sessionId, data);
       });
-      // Alt+1..9 / Alt+0 cambian de terminal; xterm no debe enviarlos al equipo.
-      term.attachCustomKeyEventHandler((event) => !(event.altKey && /^Digit[0-9]$/.test(event.code)));
+
+      term.attachCustomKeyEventHandler((event) => {
+        // Alt+1..9 / Alt+0 cambian de terminal; xterm no debe enviarlos al equipo.
+        if (event.altKey && /^Digit[0-9]$/.test(event.code)) return false;
+        const action = clipboardAction(event, term);
+        if (action === 'copy') {
+          event.preventDefault();
+          if (event.type === 'keydown') onCopy(slot);
+          return false;
+        }
+        // Pegar: xterm ignora la tecla y el navegador genera el evento "paste", que se intercepta abajo.
+        if (action === 'paste') return false;
+        return true;
+      });
+
+      // Todo pegado (teclado, menu Edicion, clic derecho) pasa por onPaste: confirmacion y envio pausado.
+      pane.addEventListener('paste', (event) => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
+        onPaste(slot, text);
+      }, true);
+      pane.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        onContextMenu(slot, event);
+      });
 
       term.writeln(`Cisco Switch Console - Terminal ${slot.number}`);
       term.writeln('Complete los datos de conexion y presione Conectar.');
+      term.writeln(`\x1b[90mCopiar: seleccionar + ${IS_MAC ? 'Cmd' : 'Ctrl'}+C | Pegar: ${IS_MAC ? 'Cmd' : 'Ctrl'}+V | Clic derecho: menu\x1b[0m`);
 
       slots.push(slot);
       render();

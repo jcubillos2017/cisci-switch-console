@@ -82,6 +82,18 @@ En una Mac tambien se puede compilar localmente con `./build-mac.sh`. Instalacio
 
 El generador no incluye credenciales por defecto: el secret del usuario local es obligatorio y el enable secret solo se modifica si se completa. En Catalyst 9200/9300 se usa `algorithm-type scrypt`.
 
+## Copiar y pegar en la terminal
+
+| Accion | Windows / Linux | macOS |
+|---|---|---|
+| Copiar seleccion | Seleccionar + `Ctrl+C`, `Ctrl+Shift+C` o `Ctrl+Insert` | `Cmd+C` |
+| Pegar | `Ctrl+V`, `Ctrl+Shift+V` o `Shift+Insert` | `Cmd+V` |
+| Menu (Copiar, Pegar, Seleccionar todo, Limpiar) | Clic derecho | Clic derecho |
+
+- Sin texto seleccionado, `Ctrl+C` se envia al equipo como interrupcion, como siempre.
+- Una sola linea copiada con su salto final se pega **sin** Enter: no se ejecuta hasta presionar Enter (evita, por ejemplo, enviar un enable secret vacio).
+- Varias lineas piden confirmacion con vista previa, porque cada una se ejecuta como comando. Se envian pausadas (mas lento por consola serial) y `Ctrl+C` cancela el pegado.
+
 ## Protocolos
 
 | Protocolo | Uso | Notas |

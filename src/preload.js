@@ -14,6 +14,9 @@ contextBridge.exposeInMainWorld('switchConsole', {
   backupProfile: (profile) => ipcRenderer.invoke('backup:profile', profile),
   listSerialPorts: () => ipcRenderer.invoke('serial:list'),
   sendBreak: (sessionId) => ipcRenderer.invoke('session:break', sessionId),
+  clipboardRead: () => ipcRenderer.invoke('clipboard:read'),
+  clipboardWrite: (text) => ipcRenderer.invoke('clipboard:write', text),
+  terminalMenu: (state) => ipcRenderer.invoke('terminal:context-menu', state),
   onData: (callback) => {
     ipcRenderer.on('session:data', (_event, payload) => callback(payload));
   },
